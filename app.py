@@ -12,26 +12,19 @@ from supabase import create_client
 
 
 # =========================================================
-# KONUHA
-# نظام إدارة الأعضاء والمشرفين
+# KONUHA — نظام إدارة الأعضاء والمشرفين
 # =========================================================
 
 st.set_page_config(
     page_title="KONUHA",
     page_icon="K",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
-
-
-# =========================================================
-# SETTINGS
-# =========================================================
 
 BASE_DIR = Path(__file__).parent
 ASSETS_DIR = BASE_DIR / "assets"
 FONTS_DIR = BASE_DIR / "fonts"
-
 LEAF_PATH = ASSETS_DIR / "naruto_leaf.png"
 
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
@@ -44,10 +37,9 @@ SITE_PASSWORD = st.secrets.get("SITE_PASSWORD", "")
 # =========================================================
 
 def file_to_base64(path: Path):
-    """تحويل صورة إلى Base64 حتى نستخدمها داخل HTML."""
     try:
         if path.exists():
-            return base64.b64encode(path.read_bytes()).decode()
+            return base64.b64encode(path.read_bytes()).decode("utf-8")
     except Exception:
         pass
     return ""
@@ -57,18 +49,9 @@ LEAF_BASE64 = file_to_base64(LEAF_PATH)
 
 
 def normalize_arabic(text):
-    """
-    توحيد الأسماء والألقاب للمقارنة.
-    مثال:
-    أرين / ايرن / أيرن
-    """
     text = str(text or "").strip().lower()
-
     text = unicodedata.normalize("NFKD", text)
-    text = "".join(
-        char for char in text
-        if not unicodedata.combining(char)
-    )
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
 
     replacements = {
         "أ": "ا",
@@ -104,33 +87,12 @@ def parse_date(value):
         if not value:
             return None
 
-        value = str(value).replace("Z", "+00:00")
-
-        return datetime.fromisoformat(value).date()
+        return datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        ).date()
 
     except Exception:
         return None
-
-
-def logo_html(class_name="brand-logo"):
-    """
-    K + شعار ناروتو + NUHA
-    """
-
-    if LEAF_BASE64:
-        return f"""
-        <div class="{class_name}">
-            <span>K</span>
-            <img src="data:image/png;base64,{LEAF_BASE64}">
-            <span>NUHA</span>
-        </div>
-        """
-
-    return f"""
-    <div class="{class_name}">
-        <span>KONUHA</span>
-    </div>
-    """
 
 
 def supervisor_name(supervisors, supervisor_id):
@@ -141,12 +103,134 @@ def supervisor_name(supervisors, supervisor_id):
     return "-"
 
 
+def font_file(keyword, weight_words):
+    normalized_keyword = (
+        keyword
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+
+    for path in FONTS_DIR.glob("*.ttf"):
+        name = (
+            path.name
+            .lower()
+            .replace("_", "")
+            .replace("-", "")
+            .replace(" ", "")
+        )
+
+        if (
+            normalized_keyword in name
+            and any(word in name for word in weight_words)
+        ):
+            return path
+
+    return None
+
+
+def font_face(keyword, family, weight_words, css_weight):
+    path = font_file(
+        keyword,
+        weight_words,
+    )
+
+    if not path:
+        return ""
+
+    data = file_to_base64(path)
+
+    if not data:
+        return ""
+
+    return (
+        f"@font-face{{"
+        f"font-family:'{family}';"
+        f"font-style:normal;"
+        f"font-weight:{css_weight};"
+        f"src:url(data:font/ttf;base64,{data}) "
+        f"format('truetype');"
+        f"}}"
+    )
+
+
+def build_font_css():
+    regular_words = [
+        "regular",
+        "normal",
+        "400",
+    ]
+
+    medium_words = [
+        "medium",
+        "500",
+    ]
+
+    semibold_words = [
+        "semibold",
+        "600",
+    ]
+
+    bold_words = [
+        "bold",
+        "700",
+        "800",
+    ]
+
+    css = []
+
+    for keyword, family in [
+        ("Cairo", "KonohaCairo"),
+        ("Inter", "KonohaInter"),
+        ("ReadexPro", "KonohaReadex"),
+        ("Readex_Pro", "KonohaReadex"),
+    ]:
+
+        css.extend(
+            [
+                font_face(
+                    keyword,
+                    family,
+                    regular_words,
+                    400,
+                ),
+                font_face(
+                    keyword,
+                    family,
+                    medium_words,
+                    500,
+                ),
+                font_face(
+                    keyword,
+                    family,
+                    semibold_words,
+                    600,
+                ),
+                font_face(
+                    keyword,
+                    family,
+                    bold_words,
+                    700,
+                ),
+            ]
+        )
+
+    return "\n".join(
+        dict.fromkeys(css)
+    )
+
+
+FONT_CSS = build_font_css()
+
+
 # =========================================================
-# SUPABASE
+# DATABASE
 # =========================================================
 
 @st.cache_resource
 def get_database():
+
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
 
@@ -155,6 +239,7 @@ def get_database():
             SUPABASE_URL,
             SUPABASE_KEY,
         )
+
     except Exception:
         return None
 
@@ -164,15 +249,19 @@ supabase = get_database()
 
 @st.cache_data(ttl=20)
 def check_connection():
+
     try:
+
         if supabase is None:
             return False
 
-        supabase \
-            .table("supervisors") \
-            .select("id") \
-            .limit(1) \
+        (
+            supabase
+            .table("supervisors")
+            .select("id")
+            .limit(1)
             .execute()
+        )
 
         return True
 
@@ -182,7 +271,9 @@ def check_connection():
 
 @st.cache_data(ttl=15)
 def load_members():
+
     try:
+
         if supabase is None:
             return []
 
@@ -190,7 +281,10 @@ def load_members():
             supabase
             .table("members")
             .select("*")
-            .order("created_at", desc=True)
+            .order(
+                "created_at",
+                desc=True,
+            )
             .execute()
         )
 
@@ -202,7 +296,9 @@ def load_members():
 
 @st.cache_data(ttl=15)
 def load_supervisors():
+
     try:
+
         if supabase is None:
             return []
 
@@ -221,1128 +317,353 @@ def load_supervisors():
 
 
 def clear_database_cache():
-    try:
-        load_members.clear()
-    except Exception:
-        pass
 
-    try:
-        load_supervisors.clear()
-    except Exception:
-        pass
+    for fn in (
+        load_members,
+        load_supervisors,
+        check_connection,
+    ):
 
-    try:
-        check_connection.clear()
-    except Exception:
-        pass
+        try:
+            fn.clear()
+
+        except Exception:
+            pass
 
 
 # =========================================================
-# GLOBAL CSS
+# VISUAL SYSTEM
 # =========================================================
 
 st.markdown(
-    """
+    f"""
 <style>
 
-@import url(
-'https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=Readex+Pro:wght@400;500;600;700&display=swap'
-);
+{FONT_CSS}
+
+:root {{
+    --bg: #05060b;
+    --surface: #0a0c14;
+    --surface-2: #0f1220;
+    --surface-3: #151827;
+
+    --text: #f7f8ff;
+    --muted: #9298ab;
+
+    --red: #ff3158;
+    --red-2: #b70f35;
+
+    --purple: #8b5cff;
+    --pink: #e948a4;
+
+    --green: #42e6a1;
+
+    --line: rgba(255,255,255,.08);
+}}
 
 
 /* =====================================================
    GLOBAL
    ===================================================== */
 
-* {
+* {{
     box-sizing: border-box;
-}
+}}
 
 html,
 body,
+[data-testid="stApp"],
 [data-testid="stAppViewContainer"],
-[data-testid="stApp"] {
+[data-testid="stMain"] {{
 
     background:
         radial-gradient(
-            850px 500px at 75% -10%,
-            rgba(164, 75, 255, .10),
-            transparent 65%
+            900px 500px at 92% -8%,
+            rgba(255,49,88,.11),
+            transparent 62%
         ),
         radial-gradient(
-            700px 500px at 0% 100%,
-            rgba(231, 77, 171, .07),
-            transparent 65%
+            800px 600px at 5% 30%,
+            rgba(139,92,255,.09),
+            transparent 64%
         ),
-        #070914 !important;
+        #05060b !important;
 
-    color: #f7f3ff !important;
-}
+    color:
+        var(--text) !important;
+}}
 
 
-[data-testid="stHeader"] {
-    display: none !important;
-}
+[data-testid="stHeader"],
+#MainMenu,
+footer {{
 
-#MainMenu {
-    display: none !important;
-}
+    display:
+        none !important;
+}}
 
-footer {
-    display: none !important;
-}
+
+[data-testid="stToolbar"] {{
+
+    display:
+        none !important;
+}}
+
+
+.block-container {{
+
+    max-width:
+        1480px !important;
+
+    padding:
+        18px 28px 60px !important;
+}}
 
 
 /* =====================================================
-   MAIN CONTAINER
+   TOP
    ===================================================== */
 
-.block-container {
-    max-width: 1500px !important;
-    padding: 18px 25px 50px !important;
-}
+.k-top {{
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        space-between;
+
+    gap:
+        18px;
+
+    margin-bottom:
+        16px;
+}}
 
 
-/* =====================================================
-   SIDEBAR
-   ===================================================== */
+.k-brand {{
 
-[data-testid="stSidebar"] {
+    display:
+        flex;
 
-    width: 285px !important;
-    min-width: 285px !important;
+    align-items:
+        center;
+
+    gap:
+        10px;
+
+    min-width:
+        180px;
+}}
+
+
+.k-brand-mark {{
+
+    width:
+        42px;
+
+    height:
+        42px;
+
+    border-radius:
+        13px;
+
+    display:
+        grid;
+
+    place-items:
+        center;
 
     background:
         linear-gradient(
-            180deg,
-            #0c1021 0%,
-            #080b17 100%
-        ) !important;
-
-    border-right:
-        1px solid rgba(177, 99, 255, .12) !important;
-}
-
-
-[data-testid="stSidebar"] > div:first-child {
-    padding: 0 14px 20px !important;
-}
-
-
-/* =====================================================
-   LOGO
-   ===================================================== */
-
-.brand-area {
-
-    padding:
-        25px
-        8px
-        21px;
-
-    border-bottom:
-        1px solid rgba(178, 96, 255, .12);
-
-    margin-bottom: 12px;
-}
-
-
-.brand-logo {
-
-    display: flex;
-
-    justify-content: center;
-
-    align-items: center;
-
-    gap: 1px;
-
-    font-family: Inter, sans-serif;
-
-    font-size: 38px;
-
-    font-weight: 800;
-
-    letter-spacing: 1px;
-
-    color: #ffffff;
-
-    text-shadow:
-        0 0 25px rgba(211, 95, 255, .45);
-}
-
-
-.brand-logo img {
-
-    width: 40px;
-
-    height: 40px;
-
-    object-fit: contain;
-
-    filter:
-        drop-shadow(
-            0 0 10px
-            rgba(205, 90, 255, .65)
+            145deg,
+            #ff3158,
+            #8b2cff
         );
-}
-
-
-.brand-sub {
-
-    text-align: center;
-
-    margin-top: 5px;
-
-    color: #777b94;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 12px;
-}
-
-
-.side-label {
-
-    padding:
-        10px
-        15px
-        7px;
-
-    color: #656980;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 11px;
-}
-
-
-/* =====================================================
-   SIDEBAR BUTTONS
-   ===================================================== */
-
-[data-testid="stSidebar"] .stButton > button {
-
-    width: 100% !important;
-
-    min-height: 46px !important;
-
-    margin: 2px 0 !important;
-
-    padding:
-        0
-        18px !important;
-
-    border:
-        1px solid transparent !important;
-
-    border-radius: 13px !important;
-
-    background: transparent !important;
-
-    color: #aaaec3 !important;
-
-    font-family: Cairo, sans-serif !important;
-
-    font-size: 13px !important;
-
-    text-align: right !important;
-
-    box-shadow: none !important;
-
-    transition:
-        .2s ease;
-}
-
-
-[data-testid="stSidebar"] .stButton > button:hover {
-
-    color: #ffffff !important;
-
-    background:
-        rgba(164, 91, 255, .10) !important;
-
-    border-color:
-        rgba(180, 105, 255, .15) !important;
-}
-
-
-/*
-  Active navigation.
-*/
-
-.nav-active button {
-
-    color: #ffffff !important;
-
-    background:
-        linear-gradient(
-            90deg,
-            rgba(155, 85, 255, .23),
-            rgba(225, 80, 178, .07)
-        ) !important;
-
-    border-color:
-        rgba(185, 105, 255, .18) !important;
 
     box-shadow:
-        inset 4px 0
-        #c25cff !important;
-}
+        0 0 28px
+        rgba(255,49,88,.22);
+
+    font:
+        800 18px
+        'KonohaInter',
+        Inter,
+        sans-serif;
+
+    color:
+        #fff;
+}}
+
+
+.k-brand-name {{
+
+    font:
+        800 22px
+        'KonohaInter',
+        Inter,
+        sans-serif;
+
+    letter-spacing:
+        1px;
+}}
+
+
+.k-brand-sub {{
+
+    color:
+        var(--muted);
+
+    font:
+        500 10px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+
+    margin-top:
+        -2px;
+}}
+
+
+.k-status {{
+
+    display:
+        inline-flex;
+
+    align-items:
+        center;
+
+    gap:
+        8px;
+
+    padding:
+        8px 13px;
+
+    border:
+        1px solid
+        var(--line);
+
+    border-radius:
+        999px;
+
+    background:
+        rgba(255,255,255,.035);
+
+    font:
+        600 11px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+
+    white-space:
+        nowrap;
+}}
+
+
+.k-status.online {{
+
+    color:
+        #6af0b3;
+
+    border-color:
+        rgba(66,230,161,.22);
+}}
+
+
+.k-status.offline {{
+
+    color:
+        #ff8297;
+
+    border-color:
+        rgba(255,49,88,.25);
+}}
 
 
 /* =====================================================
-   TOP BAR
+   NAVIGATION
    ===================================================== */
 
-.topbar {
+div.stButton > button {{
 
-    min-height: 52px;
+    min-height:
+        42px;
 
-    display: flex;
-
-    justify-content: flex-end;
-
-    align-items: center;
-
-    gap: 10px;
-
-    margin-bottom: 10px;
-}
-
-
-.connection {
-
-    padding:
-        9px
-        16px;
-
-    border-radius: 999px;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 12px;
+    border-radius:
+        12px !important;
 
     border:
-        1px solid rgba(69, 227, 153, .35);
-}
-
-
-.connection.online {
-
-    color: #63e8a6;
+        1px solid
+        rgba(255,255,255,.07) !important;
 
     background:
-        rgba(69, 227, 153, .05);
-}
+        rgba(255,255,255,.035) !important;
+
+    color:
+        #bfc3d2 !important;
+
+    font:
+        600 12px
+        'KonohaCairo',
+        Cairo,
+        sans-serif !important;
+
+    transition:
+        all .18s ease !important;
+
+    box-shadow:
+        none !important;
+}}
 
 
-.connection.offline {
+div.stButton > button:hover {{
 
-    color: #ff8298;
-
-    background:
-        rgba(255, 90, 113, .05);
+    color:
+        #fff !important;
 
     border-color:
-        rgba(255, 90, 113, .35);
-}
+        rgba(255,49,88,.28) !important;
+
+    background:
+        linear-gradient(
+            135deg,
+            rgba(255,49,88,.14),
+            rgba(139,92,255,.10)
+        ) !important;
+
+    transform:
+        translateY(-1px);
+}}
 
 
-.top-brand {
+.k-nav-active + div.stButton > button {{
 
-    padding:
-        9px
-        17px;
+    color:
+        #fff !important;
 
-    border-radius: 999px;
+    border-color:
+        rgba(255,49,88,.38) !important;
 
-    border:
-        1px solid rgba(171, 92, 255, .18);
+    background:
+        linear-gradient(
+            135deg,
+            rgba(255,49,88,.22),
+            rgba(139,92,255,.16)
+        ) !important;
 
-    color: #c8bbd9;
-
-    font-family: Inter, sans-serif;
-
-    font-size: 12px;
-}
+    box-shadow:
+        0 0 22px
+        rgba(255,49,88,.08) !important;
+}}
 
 
 /* =====================================================
    HERO
    ===================================================== */
 
-.hero {
-
-    min-height: 330px;
-
-    position: relative;
-
-    overflow: hidden;
-
-    border-radius: 25px;
-
-    border:
-        1px solid rgba(175, 94, 255, .18);
-
-    padding:
-        48px;
-
-    background:
-
-        radial-gradient(
-            circle at 78% 38%,
-            rgba(224, 83, 180, .18),
-            transparent 27%
-        ),
-
-        radial-gradient(
-            circle at 60% 100%,
-            rgba(108, 70, 255, .12),
-            transparent 40%
-        ),
-
-        linear-gradient(
-            120deg,
-            #090c1c,
-            #11152a 54%,
-            #181126
-        );
-
-    box-shadow:
-        0 25px 75px
-        rgba(0,0,0,.35);
-}
-
-
-/* tiny particles */
-
-.hero::before {
-
-    content: "";
-
-    position: absolute;
-
-    inset: 0;
-
-    opacity: .25;
-
-    background-image:
-
-        radial-gradient(
-            circle,
-            rgba(255,255,255,.9)
-            0 1px,
-            transparent 2px
-        ),
-
-        radial-gradient(
-            circle,
-            rgba(205,112,255,.8)
-            0 1px,
-            transparent 2px
-        );
-
-    background-size:
-        150px 120px,
-        220px 170px;
-
-    pointer-events: none;
-}
-
-
-/* =====================================================
-   HERO CHARACTER / SILHOUETTE
-   ===================================================== */
-
-.hero-character {
-
-    position: absolute;
-
-    right: -20px;
-
-    bottom: -110px;
-
-    width: 440px;
-
-    height: 530px;
-
-    opacity: .72;
-
-    pointer-events: none;
-
-    z-index: 1;
-
-    background:
-
-        radial-gradient(
-            ellipse at 50% 22%,
-            rgba(235,91,191,.25)
-            0 7%,
-            transparent 8%
-        ),
-
-        radial-gradient(
-            ellipse at 50% 40%,
-            #17142e
-            0 21%,
-            transparent 22%
-        ),
-
-        radial-gradient(
-            ellipse at 50% 78%,
-            #111225
-            0 36%,
-            transparent 37%
-        );
-
-    filter:
-        drop-shadow(
-            0 0 35px
-            rgba(187,82,255,.18)
-        );
-}
-
-
-.hero-character::before {
-
-    content: "";
-
-    position: absolute;
-
-    left: 50%;
-
-    top: 17%;
-
-    transform:
-        translateX(-50%);
-
-    width: 180px;
-
-    height: 120px;
-
-    border-radius:
-        50%
-        50%
-        45%
-        45%;
-
-    background:
-        #0e0f1f;
-
-    box-shadow:
-        0 0 50px
-        rgba(215,88,195,.20);
-}
-
-
-.hero-character::after {
-
-    content: "";
-
-    position: absolute;
-
-    left: 50%;
-
-    top: 36%;
-
-    transform:
-        translateX(-50%);
-
-    width: 230px;
-
-    height: 30px;
-
-    border-radius: 8px;
-
-    background:
-        #28233f;
-
-    box-shadow:
-        0 65px 90px
-        45px
-        rgba(141,74,255,.10);
-}
-
-
-/* =====================================================
-   HERO CONTENT
-   ===================================================== */
-
-.hero-content {
-
-    position: relative;
-
-    z-index: 3;
-
-    max-width: 650px;
-}
-
-
-.hero-logo {
-
-    display: flex;
-
-    align-items: center;
-
-    font-family: Inter, sans-serif;
-
-    font-size: 72px;
-
-    font-weight: 800;
-
-    letter-spacing: 2px;
-
-    line-height: 1;
-
-    background:
-        linear-gradient(
-            90deg,
-            #ffffff,
-            #b978ff 52%,
-            #ed59b8
-        );
-
-    -webkit-background-clip: text;
-
-    background-clip: text;
-
-    color: transparent;
-}
-
-
-.hero-logo img {
-
-    width: 73px;
-
-    height: 73px;
-
-    object-fit: contain;
-
-    filter:
-        drop-shadow(
-            0 0 16px
-            rgba(205,88,255,.75)
-        );
-}
-
-
-.hero-subtitle {
-
-    margin-top: 15px;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 17px;
-
-    color: #d8d5e2;
-}
-
-
-.hero-quote {
-
-    margin-top: 30px;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 15px;
-
-    font-weight: 600;
-
-    color: #eee9f3;
-}
-
-
-.hero-line {
-
-    width: 50px;
-
-    height: 3px;
-
-    margin-top: 12px;
-
-    border-radius: 10px;
-
-    background:
-        linear-gradient(
-            90deg,
-            #aa5cff,
-            #e45ab7
-        );
-}
-
-
-/* =====================================================
-   STATISTICS CARDS
-   ===================================================== */
-
-.stats-grid {
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(4, minmax(0,1fr));
-
-    gap: 16px;
-
-    margin-top: 18px;
-}
-
-
-.stat-card {
-
-    min-height: 145px;
-
-    position: relative;
-
-    padding: 20px;
-
-    border:
-        1px solid
-        rgba(167,91,255,.15);
-
-    border-radius: 20px;
-
-    background:
-        linear-gradient(
-            145deg,
-            rgba(21,25,54,.92),
-            rgba(12,16,35,.92)
-        );
-
-    box-shadow:
-        0 16px 45px
-        rgba(0,0,0,.25);
-}
-
-
-.stat-icon {
-
-    position: absolute;
-
-    left: 20px;
-
-    top: 20px;
-
-    width: 50px;
-
-    height: 50px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    border-radius: 16px;
-
-    background:
-        rgba(150,84,255,.10);
-
-    font-size: 22px;
-}
-
-
-.stat-label {
-
-    text-align: right;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 13px;
-
-    color: #aaaec3;
-}
-
-
-.stat-value {
-
-    margin-top: 20px;
-
-    text-align: right;
-
-    font-family: Inter, sans-serif;
-
-    font-size: 38px;
-
-    font-weight: 800;
-
-    color: #ffffff;
-}
-
-
-.stat-green {
-
-    border-color:
-        rgba(70,229,157,.20);
-}
-
-
-.stat-green .stat-value {
-
-    color: #62e7a9;
-}
-
-
-.stat-pink {
-
-    border-color:
-        rgba(232,86,184,.20);
-}
-
-
-.stat-blue {
-
-    border-color:
-        rgba(59,202,224,.20);
-}
-
-
-/* =====================================================
-   MAIN PANELS
-   ===================================================== */
-
-.main-grid {
-
-    display: grid;
-
-    grid-template-columns:
-        minmax(0, 2.15fr)
-        minmax(290px, .8fr);
-
-    gap: 18px;
-
-    margin-top: 18px;
-}
-
-
-.panel {
-
-    min-height: 430px;
-
-    padding: 22px;
-
-    border:
-        1px solid
-        rgba(167,91,255,.14);
-
-    border-radius: 22px;
-
-    background:
-        rgba(12,16,32,.84);
-
-    box-shadow:
-        0 20px 55px
-        rgba(0,0,0,.25);
-}
-
-
-.panel-title {
-
-    margin-bottom: 16px;
-
-    font-family:
-        "Readex Pro",
-        Cairo,
-        sans-serif;
-
-    font-size: 18px;
-
-    font-weight: 600;
-
-    color: #f1eef8;
-}
-
-
-.empty-state {
-
-    min-height: 315px;
-
-    display: flex;
-
-    flex-direction: column;
-
-    justify-content: center;
-
-    align-items: center;
-
-    text-align: center;
-
-    color: #7e829e;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 14px;
-}
-
-
-/* =====================================================
-   INFO CARD
-   ===================================================== */
-
-.info-card {
-
-    min-height: 430px;
-
-    padding: 25px;
-
-    border:
-        1px solid
-        rgba(229,87,187,.32);
-
-    border-radius: 22px;
-
-    background:
-
-        radial-gradient(
-            circle at 50% 0%,
-            rgba(191,76,158,.12),
-            transparent 38%
-        ),
-
-        #0d1021;
-}
-
-
-.info-logo {
-
-    text-align: center;
-
-    font-family: Inter, sans-serif;
-
-    font-size: 35px;
-
-    font-weight: 800;
-
-    background:
-        linear-gradient(
-            90deg,
-            #ffffff,
-            #b66fff,
-            #ec5ab7
-        );
-
-    -webkit-background-clip: text;
-
-    background-clip: text;
-
-    color: transparent;
-}
-
-
-.info-title {
-
-    text-align: center;
-
-    margin-top: 7px;
-
-    margin-bottom: 20px;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 14px;
-
-    color: #e9e5ef;
-}
-
-
-.info-item {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 12px;
-
-    margin: 18px 0;
-}
-
-
-.info-icon {
-
-    width: 43px;
-
-    height: 43px;
-
-    flex-shrink: 0;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    border-radius: 50%;
-
-    background:
-        rgba(164,105,255,.10);
-}
-
-
-.info-item strong {
-
-    display: block;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 13px;
-
-    color: #eeeaf5;
-}
-
-
-.info-item span {
-
-    display: block;
-
-    margin-top: 2px;
-
-    font-family: Cairo, sans-serif;
-
-    font-size: 11px;
-
-    color: #85899f;
-}
-
-
-/* =====================================================
-   FORMS
-   ===================================================== */
-
-input,
-textarea,
-[data-baseweb="select"] > div {
-
-    background:
-        #0d1225 !important;
-
-    color:
-        #ffffff !important;
-
-    border-color:
-        rgba(163,91,255,.22) !important;
-
-    border-radius:
-        12px !important;
-}
-
-
-label {
-
-    font-family:
-        Cairo,
-        sans-serif !important;
-
-    color:
-        #b9bacb !important;
-}
-
-
-.stButton > button {
-
-    font-family:
-        Cairo,
-        sans-serif !important;
-
-    border-radius:
-        12px !important;
-}
-
-
-.stFormSubmitButton > button {
-
-    background:
-        linear-gradient(
-            90deg,
-            #8d4cff,
-            #d953b1
-        ) !important;
-
-    border:
-        0 !important;
-
-    color:
-        white !important;
-
-    min-height:
-        46px !important;
-
-    font-weight:
-        700 !important;
-}
-
-
-.stDownloadButton > button {
-
-    background:
-        #11162d !important;
-
-    color:
-        #ffffff !important;
-
-    border:
-        1px solid
-        rgba(166,91,255,.20) !important;
-}
-
-
-/* =====================================================
-   DATAFRAME
-   ===================================================== */
-
-[data-testid="stDataFrame"] {
-
-    border:
-        1px solid
-        rgba(165,91,255,.13) !important;
-
-    border-radius:
-        16px !important;
-
-    overflow:
-        hidden !important;
-}
-
-
-/* =====================================================
-   SECTION HEAD
-   ===================================================== */
-
-.section-head {
-
-    margin:
-        8px 0 18px;
-
-    font-family:
-        "Readex Pro",
-        Cairo,
-        sans-serif;
-
-    font-size:
-        25px;
-
-    font-weight:
-        700;
-
-    color:
-        #ffffff;
-}
-
-
-/* =====================================================
-   LOGIN
-   ===================================================== */
-
-.login-wrap {
-
-    width:
-        min(460px, calc(100vw - 28px));
-
-    margin:
-        8vh auto 0;
-
-    padding:
-        35px 28px;
+.k-hero {{
 
     position:
         relative;
@@ -1350,517 +671,1156 @@ label {
     overflow:
         hidden;
 
-    border:
-        1px solid
-        rgba(169,91,255,.25);
+    min-height:
+        360px;
 
     border-radius:
-        28px;
+        30px;
 
-    text-align:
-        center;
+    border:
+        1px solid
+        rgba(255,255,255,.09);
+
+    padding:
+        48px 50px;
 
     background:
 
         radial-gradient(
-            circle at 80% 10%,
-            rgba(224,86,184,.12),
+            circle at 80% 45%,
+            rgba(255,49,88,.22),
+            transparent 25%
+        ),
+
+        radial-gradient(
+            circle at 68% 90%,
+            rgba(139,92,255,.17),
+            transparent 34%
+        ),
+
+        linear-gradient(
+            135deg,
+            #090b12 0%,
+            #0d101b 52%,
+            #150b16 100%
+        );
+
+    box-shadow:
+
+        0 30px 90px
+        rgba(0,0,0,.48),
+
+        inset 0 1px
+        rgba(255,255,255,.035);
+}}
+
+
+.k-hero::before {{
+
+    content:
+        "";
+
+    position:
+        absolute;
+
+    inset:
+        0;
+
+    opacity:
+        .18;
+
+    background-image:
+
+        linear-gradient(
+            rgba(255,255,255,.04) 1px,
+            transparent 1px
+        ),
+
+        linear-gradient(
+            90deg,
+            rgba(255,255,255,.04) 1px,
+            transparent 1px
+        );
+
+    background-size:
+        45px 45px;
+
+    mask-image:
+        linear-gradient(
+            to right,
+            black,
+            transparent 75%
+        );
+
+    pointer-events:
+        none;
+}}
+
+
+.k-orb {{
+
+    position:
+        absolute;
+
+    width:
+        300px;
+
+    height:
+        300px;
+
+    right:
+        8%;
+
+    top:
+        50%;
+
+    transform:
+        translateY(-50%);
+
+    border-radius:
+        50%;
+
+    background:
+
+        radial-gradient(
+            circle,
+            rgba(255,49,88,.22),
+            rgba(139,92,255,.08) 42%,
+            transparent 70%
+        );
+
+    filter:
+        blur(4px);
+
+    pointer-events:
+        none;
+}}
+
+
+.k-hero-art {{
+
+    position:
+        absolute;
+
+    right:
+        3%;
+
+    bottom:
+        -70px;
+
+    width:
+        430px;
+
+    height:
+        430px;
+
+    opacity:
+        .46;
+
+    border-radius:
+        50%;
+
+    background:
+
+        radial-gradient(
+            circle at 50% 35%,
+            rgba(255,255,255,.12) 0 7%,
+            transparent 7.5%
+        ),
+
+        radial-gradient(
+            ellipse at 50% 52%,
+            rgba(18,20,34,.98) 0 25%,
+            transparent 25.7%
+        ),
+
+        radial-gradient(
+            ellipse at 50% 80%,
+            rgba(11,13,24,.98) 0 38%,
+            transparent 38.7%
+        );
+
+    filter:
+        drop-shadow(
+            0 0 55px
+            rgba(255,49,88,.15)
+        );
+
+    pointer-events:
+        none;
+}}
+
+
+.k-hero-content {{
+
+    position:
+        relative;
+
+    z-index:
+        3;
+
+    max-width:
+        690px;
+
+    direction:
+        rtl;
+
+    text-align:
+        right;
+}}
+
+
+.k-eyebrow {{
+
+    display:
+        inline-flex;
+
+    align-items:
+        center;
+
+    gap:
+        8px;
+
+    padding:
+        7px 11px;
+
+    border-radius:
+        999px;
+
+    border:
+        1px solid
+        rgba(255,255,255,.08);
+
+    background:
+        rgba(255,255,255,.035);
+
+    color:
+        #bfc4d5;
+
+    font:
+        600 11px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
+
+
+.k-eyebrow i {{
+
+    width:
+        6px;
+
+    height:
+        6px;
+
+    border-radius:
+        50%;
+
+    background:
+        var(--red);
+
+    box-shadow:
+        0 0 12px
+        var(--red);
+}}
+
+
+.k-hero-title {{
+
+    margin-top:
+        20px;
+
+    font:
+        900 78px/1
+        'KonohaInter',
+        Inter,
+        sans-serif;
+
+    letter-spacing:
+        3px;
+
+    background:
+
+        linear-gradient(
+            105deg,
+            #fff 10%,
+            #ff7b92 52%,
+            #9d6cff 95%
+        );
+
+    -webkit-background-clip:
+        text;
+
+    background-clip:
+        text;
+
+    color:
+        transparent;
+
+    filter:
+        drop-shadow(
+            0 0 30px
+            rgba(255,49,88,.14)
+        );
+}}
+
+
+.k-hero-sub {{
+
+    margin-top:
+        14px;
+
+    color:
+        #c4c8d6;
+
+    font:
+        500 17px/1.9
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
+
+
+.k-hero-quote {{
+
+    margin-top:
+        24px;
+
+    color:
+        #f4f4fb;
+
+    font:
+        700 14px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
+
+
+.k-hero-line {{
+
+    width:
+        80px;
+
+    height:
+        3px;
+
+    margin-top:
+        13px;
+
+    border-radius:
+        10px;
+
+    background:
+        linear-gradient(
+            90deg,
+            var(--red),
+            var(--purple)
+        );
+
+    box-shadow:
+        0 0 18px
+        rgba(255,49,88,.35);
+}}
+
+
+/* =====================================================
+   SECTION TITLES
+   ===================================================== */
+
+.k-section-title {{
+
+    margin:
+        28px 0 13px;
+
+    font:
+        800 21px
+        'KonohaReadex',
+        'KonohaCairo',
+        sans-serif;
+
+    color:
+        #fff;
+
+    direction:
+        rtl;
+
+    text-align:
+        right;
+}}
+
+
+/* =====================================================
+   STAT CARDS
+   ===================================================== */
+
+.k-card-grid {{
+
+    display:
+        grid;
+
+    grid-template-columns:
+        repeat(
+            4,
+            minmax(0,1fr)
+        );
+
+    gap:
+        14px;
+}}
+
+
+.k-card {{
+
+    position:
+        relative;
+
+    min-height:
+        145px;
+
+    overflow:
+        hidden;
+
+    padding:
+        20px;
+
+    border-radius:
+        21px;
+
+    border:
+        1px solid
+        rgba(255,255,255,.075);
+
+    background:
+
+        linear-gradient(
+            145deg,
+            rgba(20,23,37,.92),
+            rgba(8,10,18,.92)
+        );
+
+    box-shadow:
+        0 20px 55px
+        rgba(0,0,0,.28);
+
+    direction:
+        rtl;
+
+    text-align:
+        right;
+}}
+
+
+.k-card::after {{
+
+    content:
+        "";
+
+    position:
+        absolute;
+
+    width:
+        130px;
+
+    height:
+        130px;
+
+    right:
+        -55px;
+
+    bottom:
+        -65px;
+
+    border-radius:
+        50%;
+
+    background:
+        rgba(255,49,88,.12);
+
+    filter:
+        blur(25px);
+}}
+
+
+.k-card.red {{
+    border-color:
+        rgba(255,49,88,.20);
+}}
+
+
+.k-card.purple {{
+    border-color:
+        rgba(139,92,255,.20);
+}}
+
+
+.k-card.green {{
+    border-color:
+        rgba(66,230,161,.20);
+}}
+
+
+.k-card.blue {{
+    border-color:
+        rgba(63,191,255,.18);
+}}
+
+
+.k-card-icon {{
+
+    width:
+        45px;
+
+    height:
+        45px;
+
+    display:
+        grid;
+
+    place-items:
+        center;
+
+    border-radius:
+        14px;
+
+    background:
+        rgba(255,255,255,.05);
+
+    font-size:
+        19px;
+}}
+
+
+.k-card-label {{
+
+    margin-top:
+        17px;
+
+    color:
+        #9398ab;
+
+    font:
+        600 11px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
+
+
+.k-card-value {{
+
+    margin-top:
+        3px;
+
+    color:
+        #fff;
+
+    font:
+        900 31px
+        'KonohaInter',
+        Inter,
+        sans-serif;
+}}
+
+
+.k-card.red .k-card-value {{
+    color:
+        #ff6a83;
+}}
+
+
+.k-card.purple .k-card-value {{
+    color:
+        #b28dff;
+}}
+
+
+.k-card.green .k-card-value {{
+    color:
+        #68edb1;
+}}
+
+
+.k-card.blue .k-card-value {{
+    color:
+        #73d6ff;
+}}
+
+
+/* =====================================================
+   PANELS
+   ===================================================== */
+
+.k-panel {{
+
+    border:
+        1px solid
+        rgba(255,255,255,.07);
+
+    border-radius:
+        24px;
+
+    padding:
+        22px;
+
+    background:
+        rgba(8,10,18,.78);
+
+    box-shadow:
+        0 22px 60px
+        rgba(0,0,0,.25);
+}}
+
+
+.k-panel-title {{
+
+    margin-bottom:
+        14px;
+
+    color:
+        #fff;
+
+    font:
+        700 17px
+        'KonohaReadex',
+        'KonohaCairo',
+        sans-serif;
+
+    direction:
+        rtl;
+
+    text-align:
+        right;
+}}
+
+
+/* =====================================================
+   INFO
+   ===================================================== */
+
+.k-info {{
+
+    border-radius:
+        24px;
+
+    padding:
+        28px;
+
+    min-height:
+        360px;
+
+    border:
+        1px solid
+        rgba(255,49,88,.20);
+
+    background:
+
+        radial-gradient(
+            circle at 50% 0%,
+            rgba(255,49,88,.14),
+            transparent 38%
+        ),
+
+        linear-gradient(
+            145deg,
+            #0e111d,
+            #090b13
+        );
+
+    text-align:
+        center;
+}}
+
+
+.k-info-logo {{
+
+    font:
+        900 36px
+        'KonohaInter',
+        Inter,
+        sans-serif;
+
+    background:
+
+        linear-gradient(
+            90deg,
+            #fff,
+            #ff6d87,
+            #9d6cff
+        );
+
+    -webkit-background-clip:
+        text;
+
+    background-clip:
+        text;
+
+    color:
+        transparent;
+}}
+
+
+.k-info-title {{
+
+    margin-top:
+        7px;
+
+    color:
+        #d9dbe5;
+
+    font:
+        600 13px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
+
+
+.k-info-item {{
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    gap:
+        12px;
+
+    margin:
+        22px 0;
+
+    direction:
+        rtl;
+
+    text-align:
+        right;
+}}
+
+
+.k-info-icon {{
+
+    width:
+        43px;
+
+    height:
+        43px;
+
+    flex:
+        0 0 43px;
+
+    display:
+        grid;
+
+    place-items:
+        center;
+
+    border-radius:
+        14px;
+
+    background:
+        rgba(255,49,88,.08);
+
+    border:
+        1px solid
+        rgba(255,49,88,.10);
+}}
+
+
+.k-info-item strong {{
+
+    display:
+        block;
+
+    color:
+        #f1f2f7;
+
+    font:
+        700 12px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
+
+
+.k-info-item span {{
+
+    display:
+        block;
+
+    margin-top:
+        2px;
+
+    color:
+        #7f8497;
+
+    font:
+        500 10px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
+
+
+/* =====================================================
+   INPUTS
+   ===================================================== */
+
+div[data-baseweb="input"] > div,
+div[data-baseweb="textarea"] > div,
+div[data-baseweb="select"] > div {{
+
+    background:
+        #0d101a !important;
+
+    border-color:
+        rgba(255,255,255,.09) !important;
+
+    border-radius:
+        13px !important;
+}}
+
+
+input,
+textarea {{
+
+    color:
+        #fff !important;
+
+    font-family:
+        'KonohaCairo',
+        Cairo,
+        sans-serif !important;
+}}
+
+
+label {{
+
+    color:
+        #b8bdcd !important;
+
+    font:
+        600 12px
+        'KonohaCairo',
+        Cairo,
+        sans-serif !important;
+}}
+
+
+.stForm {{
+
+    border:
+        1px solid
+        rgba(255,255,255,.07) !important;
+
+    border-radius:
+        24px !important;
+
+    padding:
+        22px !important;
+
+    background:
+        rgba(8,10,18,.78) !important;
+}}
+
+
+/* =====================================================
+   DATAFRAME
+   ===================================================== */
+
+div[data-testid="stDataFrame"] {{
+
+    border:
+        1px solid
+        rgba(255,255,255,.07) !important;
+
+    border-radius:
+        17px !important;
+
+    overflow:
+        hidden !important;
+}}
+
+
+/* =====================================================
+   FORM BUTTON
+   ===================================================== */
+
+div.stFormSubmitButton > button {{
+
+    min-height:
+        47px !important;
+
+    border:
+        0 !important;
+
+    color:
+        #fff !important;
+
+    background:
+
+        linear-gradient(
+            100deg,
+            #ff3158,
+            #b52bff
+        ) !important;
+
+    box-shadow:
+        0 12px 28px
+        rgba(255,49,88,.17) !important;
+
+    font-weight:
+        800 !important;
+}}
+
+
+/* =====================================================
+   DOWNLOAD
+   ===================================================== */
+
+div.stDownloadButton > button {{
+
+    min-height:
+        46px !important;
+
+    border-color:
+        rgba(255,255,255,.09) !important;
+
+    background:
+        #10131f !important;
+
+    color:
+        #fff !important;
+}}
+
+
+/* =====================================================
+   LOGIN
+   ===================================================== */
+
+.k-login {{
+
+    max-width:
+        500px;
+
+    margin:
+        8vh auto 0;
+
+    padding:
+        42px 34px 30px;
+
+    border:
+        1px solid
+        rgba(255,49,88,.18);
+
+    border-radius:
+        30px;
+
+    background:
+
+        radial-gradient(
+            circle at 80% 5%,
+            rgba(255,49,88,.16),
             transparent 35%
         ),
 
         linear-gradient(
             145deg,
-            #11152b,
-            #080c1b
+            #10131f,
+            #070911
         );
 
     box-shadow:
-        0 30px 100px
+        0 35px 110px
         rgba(0,0,0,.55);
-}
 
-
-.login-wrap::after {
-
-    content: "";
-
-    position: absolute;
-
-    width: 320px;
-
-    height: 380px;
-
-    right: -120px;
-
-    bottom: -160px;
-
-    background:
-        radial-gradient(
-            ellipse,
-            rgba(214,87,184,.18),
-            transparent 65%
-        );
-
-    pointer-events: none;
-}
-
-
-.login-logo {
-
-    position:
-        relative;
-
-    z-index:
-        2;
-
-    display:
-        flex;
-
-    justify-content:
+    text-align:
         center;
+}}
 
-    align-items:
-        center;
 
-    font-family:
+.k-login-logo {{
+
+    font:
+        900 58px
+        'KonohaInter',
         Inter,
         sans-serif;
 
-    font-size:
-        54px;
+    letter-spacing:
+        2px;
 
-    font-weight:
-        800;
+    background:
+
+        linear-gradient(
+            90deg,
+            #fff,
+            #ff617c,
+            #9b6cff
+        );
+
+    -webkit-background-clip:
+        text;
+
+    background-clip:
+        text;
 
     color:
-        #ffffff;
-}
+        transparent;
+}}
 
 
-.login-logo img {
-
-    width:
-        57px;
-
-    height:
-        57px;
-
-    object-fit:
-        contain;
-
-    filter:
-        drop-shadow(
-            0 0 14px
-            rgba(208,91,255,.7)
-        );
-}
-
-
-.login-sub {
-
-    position:
-        relative;
-
-    z-index:
-        2;
+.k-login-sub {{
 
     margin:
-        8px 0 25px;
-
-    font-family:
-        Cairo,
-        sans-serif;
-
-    font-size:
-        14px;
+        8px 0 24px;
 
     color:
-        #9498af;
-}
+        #858a9d;
 
-
-/* =====================================================
-   MOBILE NAVIGATION
-   ===================================================== */
-
-.mobile-navigation {
-
-    display:
-        none;
-
-    margin-bottom:
-        12px;
-}
-
-
-.mobile-navigation label {
-
-    display:
-        block;
-
-    margin-bottom:
-        5px;
-}
+    font:
+        500 12px
+        'KonohaCairo',
+        Cairo,
+        sans-serif;
+}}
 
 
 /* =====================================================
    MOBILE
    ===================================================== */
 
-@media (max-width: 900px) {
+@media (max-width: 1000px) {{
 
-    [data-testid="stSidebar"] {
-        display:
-            none !important;
-    }
+    .k-card-grid {{
+        grid-template-columns:
+            repeat(
+                2,
+                minmax(0,1fr)
+            );
+    }}
 
-    .mobile-navigation {
-        display:
-            block !important;
-    }
+    .k-hero-art {{
+        right:
+            -100px;
 
-    .block-container {
+        opacity:
+            .28;
+    }}
+
+    .k-hero-title {{
+        font-size:
+            60px;
+    }}
+}}
+
+
+@media (max-width: 700px) {{
+
+    .block-container {{
         padding:
-            10px 14px 35px !important;
-    }
+            12px 12px 40px !important;
+    }}
 
+    .k-top {{
+        align-items:
+            flex-start;
 
-    .topbar {
-        justify-content:
-            center;
+        flex-direction:
+            column;
+    }}
 
-        min-height:
-            48px;
-    }
+    .k-brand {{
+        min-width:
+            0;
+    }}
 
-
-    .hero {
-
+    .k-hero {{
         min-height:
             350px;
 
         padding:
-            32px 22px;
+            30px 22px;
 
         border-radius:
-            22px;
-    }
+            23px;
+    }}
 
-
-    .hero-logo {
-
+    .k-hero-title {{
         font-size:
-            56px;
-    }
-
-
-    .hero-logo img {
-
-        width:
-            57px;
-
-        height:
-            57px;
-    }
-
-
-    .hero-subtitle {
-
-        font-size:
-            14px;
-
-        max-width:
-            270px;
-    }
-
-
-    .hero-character {
-
-        width:
-            340px;
-
-        height:
-            430px;
-
-        right:
-            -105px;
-
-        bottom:
-            -100px;
-
-        opacity:
-            .42;
-    }
-
-
-    .hero-quote {
-
-        position:
-            absolute;
-
-        right:
-            22px;
-
-        bottom:
-            32px;
-
-        top:
-            auto;
-
-        max-width:
-            230px;
-    }
-
-
-    .stats-grid {
-
-        grid-template-columns:
-            repeat(2, minmax(0, 1fr));
-
-        gap:
-            12px;
-    }
-
-
-    .stat-card {
-
-        min-height:
-            130px;
-
-        padding:
-            17px;
-
-        border-radius:
-            18px;
-    }
-
-
-    .stat-icon {
-
-        width:
-            43px;
-
-        height:
-            43px;
-
-        left:
-            17px;
-
-        top:
-            17px;
-    }
-
-
-    .stat-value {
-
-        font-size:
-            31px;
-    }
-
-
-    .main-grid {
-
-        grid-template-columns:
-            1fr;
-    }
-
-
-    .info-card {
-
-        min-height:
-            auto;
-    }
-}
-
-
-/* =====================================================
-   SMALL PHONE
-   ===================================================== */
-
-@media (max-width: 520px) {
-
-    .topbar {
-
-        flex-wrap:
-            wrap;
-
-        gap:
-            7px;
-    }
-
-
-    .connection,
-    .top-brand {
-
-        padding:
-            8px 12px;
-
-        font-size:
-            11px;
-    }
-
-
-    .hero {
-
-        min-height:
-            330px;
-
-        padding:
-            27px 19px;
-
-        border-radius:
-            20px;
-    }
-
-
-    .hero-logo {
-
-        font-size:
-            43px;
+            45px;
 
         letter-spacing:
             1px;
-    }
+    }}
 
-
-    .hero-logo img {
-
-        width:
-            45px;
-
-        height:
-            45px;
-    }
-
-
-    .hero-subtitle {
-
+    .k-hero-sub {{
         font-size:
             13px;
-    }
+    }}
 
-
-    .hero-quote {
-
-        font-size:
-            12px;
-
-        max-width:
-            205px;
-    }
-
-
-    .hero-character {
-
+    .k-hero-art {{
         width:
-            280px;
+            330px;
 
         height:
-            370px;
+            330px;
 
         right:
             -105px;
 
         bottom:
-            -90px;
+            -65px;
 
         opacity:
-            .34;
-    }
+            .23;
+    }}
 
-
-    .stats-grid {
-
-        grid-template-columns:
-            repeat(2, minmax(0, 1fr));
-
+    .k-card-grid {{
         gap:
             10px;
-    }
+    }}
 
-
-    .stat-card {
-
+    .k-card {{
         min-height:
-            124px;
+            125px;
 
         padding:
             15px;
+    }}
 
-        border-radius:
-            17px;
-    }
-
-
-    .stat-label {
-
+    .k-card-value {{
         font-size:
-            11px;
-    }
+            27px;
+    }}
+
+    .k-info {{
+        min-height:
+            auto;
+    }}
+}}
 
 
-    .stat-value {
+@media (max-width: 430px) {{
 
+    .k-card-grid {{
+        grid-template-columns:
+            1fr 1fr;
+    }}
+
+    .k-brand-name {{
         font-size:
-            28px;
+            19px;
+    }}
 
-        margin-top:
-            18px;
-    }
-
-
-    .stat-icon {
-
+    .k-brand-mark {{
         width:
-            40px;
+            38px;
 
         height:
-            40px;
-
-        left:
-            14px;
-
-        top:
-            14px;
-
-        font-size:
-            18px;
-    }
-
-
-    .section-head {
-
-        font-size:
-            21px;
-    }
-
-
-    .login-wrap {
-
-        margin-top:
-            6vh;
-
-        padding:
-            30px 19px;
-    }
-
-
-    .login-logo {
-
-        font-size:
-            43px;
-    }
-
-
-    .login-logo img {
-
-        width:
-            45px;
-
-        height:
-            45px;
-    }
-}
+            38px;
+    }}
+}}
 
 </style>
 """,
@@ -1879,21 +1839,15 @@ if "authenticated" not in st.session_state:
 if not st.session_state.authenticated:
 
     st.markdown(
-        f"""
-        <div class="login-wrap">
-
-            <div class="login-logo">
-                K
-                <img
-                    src="data:image/png;base64,{LEAF_BASE64}"
-                >
-                NUHA
+        """
+        <div class="k-login">
+            <div class="k-login-logo">
+                KONUHA
             </div>
 
-            <div class="login-sub">
+            <div class="k-login-sub">
                 نظام إدارة الأعضاء والمشرفين
             </div>
-
         </div>
         """,
         unsafe_allow_html=True,
@@ -1907,18 +1861,24 @@ if not st.session_state.authenticated:
             placeholder="أدخل كلمة المرور",
         )
 
-        login_button = st.form_submit_button(
+        login = st.form_submit_button(
             "دخول إلى KONUHA",
             use_container_width=True,
         )
 
-    if login_button:
+    if login:
 
         if SITE_PASSWORD and password == SITE_PASSWORD:
 
             st.session_state.authenticated = True
 
             st.rerun()
+
+        elif not SITE_PASSWORD:
+
+            st.error(
+                "لم يتم ضبط SITE_PASSWORD في Secrets."
+            )
 
         else:
 
@@ -1937,169 +1897,78 @@ members = load_members()
 supervisors = load_supervisors()
 
 
-# =========================================================
-# NAVIGATION
-# =========================================================
-
 if "page" not in st.session_state:
     st.session_state.page = "الرئيسية"
 
 
 NAVIGATION = [
+
     ("⌂", "الرئيسية"),
-    ("♟", "الأعضاء"),
+
+    ("♙", "الأعضاء"),
+
     ("＋", "إضافة عضو"),
-    ("⬡", "المشرفين"),
+
+    ("♜", "المشرفين"),
+
     ("✚", "إضافة مشرف"),
-    ("▥", "الإحصائيات"),
+
+    ("▦", "الإحصائيات"),
+
     ("⇩", "التصدير"),
+
     ("⌫", "الحذف"),
+
 ]
 
 
 # =========================================================
-# SIDEBAR - DESKTOP
+# HEADER
 # =========================================================
 
-with st.sidebar:
+connected = check_connection()
 
-    st.markdown(
-        f"""
-        <div class="brand-area">
-
-            {logo_html("brand-logo")}
-
-            <div class="brand-sub">
-                نظام إدارة الأعضاء
-            </div>
-
-        </div>
-
-        <div class="side-label">
-            القائمة الرئيسية
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-    for icon, label in NAVIGATION:
-
-        active = (
-            st.session_state.page == label
-        )
-
-        if active:
-            st.markdown(
-                '<div class="nav-active">',
-                unsafe_allow_html=True,
-            )
-
-        clicked = st.button(
-            f"{icon}   {label}",
-            key=f"sidebar_{label}",
-            use_container_width=True,
-        )
-
-        if active:
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-        if clicked:
-
-            st.session_state.page = label
-
-            st.rerun()
-
-
-    st.markdown(
-        "<br>",
-        unsafe_allow_html=True,
-    )
-
-
-    if st.button(
-        "↪   تسجيل الخروج",
-        key="logout_button",
-        use_container_width=True,
-    ):
-
-        st.session_state.authenticated = False
-
-        st.rerun()
-
-
-# =========================================================
-# MOBILE NAVIGATION
-# =========================================================
-
-st.markdown(
-    '<div class="mobile-navigation">',
-    unsafe_allow_html=True,
+status_class = (
+    "online"
+    if connected
+    else
+    "offline"
 )
 
-
-mobile_page = st.selectbox(
-    "القائمة",
-    [item[1] for item in NAVIGATION],
-    index=[
-        item[1]
-        for item in NAVIGATION
-    ].index(
-        st.session_state.page
-    ),
-    key="mobile_page_selector",
+status_text = (
+    "🟢 متصل بـ Supabase"
+    if connected
+    else
+    "🔴 غير متصل بـ Supabase"
 )
-
-
-if mobile_page != st.session_state.page:
-
-    st.session_state.page = mobile_page
-
-    st.rerun()
-
-
-st.markdown(
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-
-# =========================================================
-# TOP STATUS
-# =========================================================
-
-is_connected = check_connection()
-
-if is_connected:
-
-    status_class = "online"
-
-    status_text = (
-        "🟢 متصل بـ Supabase"
-    )
-
-else:
-
-    status_class = "offline"
-
-    status_text = (
-        "🔴 غير متصل بـ Supabase"
-    )
 
 
 st.markdown(
     f"""
-    <div class="topbar">
+    <div class="k-top">
 
-        <div class="connection {status_class}">
-            {status_text}
+        <div class="k-brand">
+
+            <div class="k-brand-mark">
+                K
+            </div>
+
+            <div>
+
+                <div class="k-brand-name">
+                    KONUHA
+                </div>
+
+                <div class="k-brand-sub">
+                    CONTROL • MEMBERS • DATA
+                </div>
+
+            </div>
+
         </div>
 
-        <div class="top-brand">
-            KONUHA
+        <div class="k-status {status_class}">
+            {status_text}
         </div>
 
     </div>
@@ -2109,119 +1978,185 @@ st.markdown(
 
 
 # =========================================================
+# NAVIGATION
+# =========================================================
+
+nav_cols = st.columns(
+    len(NAVIGATION),
+    gap="small",
+)
+
+
+for col, (icon, label) in zip(
+    nav_cols,
+    NAVIGATION,
+):
+
+    with col:
+
+        if st.session_state.page == label:
+
+            st.markdown(
+                '<div class="k-nav-active"></div>',
+                unsafe_allow_html=True,
+            )
+
+        if st.button(
+            f"{icon}  {label}",
+            key=f"nav_{label}",
+            use_container_width=True,
+        ):
+
+            st.session_state.page = label
+
+            st.rerun()
+
+
+st.markdown(
+    "<div style='height:8px'></div>",
+    unsafe_allow_html=True,
+)
+
+
+# =========================================================
+# LOGOUT
+# =========================================================
+
+logout_col = st.columns(
+    [7, 1]
+)[1]
+
+
+with logout_col:
+
+    if st.button(
+        "↪ خروج",
+        key="logout",
+        use_container_width=True,
+    ):
+
+        st.session_state.authenticated = False
+
+        st.rerun()
+
+
+# =========================================================
 # HOME
 # =========================================================
 
 if st.session_state.page == "الرئيسية":
 
+    today_members = sum(
+        1
+        for member in members
+        if parse_date(
+            member.get("created_at")
+        ) == date.today()
+    )
+
+
     st.markdown(
-        f"""
-        <div class="hero">
+        """
+        <section class="k-hero">
 
-            <div class="hero-character"></div>
+            <div class="k-orb"></div>
 
-            <div class="hero-content">
+            <div class="k-hero-art"></div>
 
-                <div class="hero-logo">
+            <div class="k-hero-content">
 
-                    <span>K</span>
+                <div class="k-eyebrow">
+                    <i></i>
+                    KONUHA CONTROL CENTER
+                </div>
 
-                    <img
-                        src="data:image/png;base64,{LEAF_BASE64}"
-                    >
+                <div class="k-hero-title">
+                    KONUHA
+                </div>
 
-                    <span>NUHA</span>
+                <div class="k-hero-sub">
+
+                    نظام إدارة الأعضاء والمشرفين —
+                    كل بياناتك في مكان واحد،
+                    بواجهة سريعة وواضحة ومصممة بهوية KONUHA.
 
                 </div>
 
-                <div class="hero-subtitle">
-                    نظام إدارة الأعضاء والمشرفين
+                <div class="k-hero-quote">
+
+                    "نظام مرتب. بيانات واضحة. إدارة أسهل."
+
                 </div>
 
-                <div class="hero-quote">
-                    "الأشياء العظيمة تبدأ بخطوة صغيرة"
-                </div>
-
-                <div class="hero-line"></div>
+                <div class="k-hero-line"></div>
 
             </div>
 
-        </div>
+        </section>
         """,
         unsafe_allow_html=True,
     )
 
 
-    # -----------------------------------------------------
-    # TODAY COUNT
-    # -----------------------------------------------------
-
-    today_members = 0
-
-    for member in members:
-
-        created = parse_date(
-            member.get("created_at")
-        )
-
-        if created == date.today():
-
-            today_members += 1
+    st.markdown(
+        '<div class="k-section-title">نظرة سريعة</div>',
+        unsafe_allow_html=True,
+    )
 
 
-    # -----------------------------------------------------
-    # STATISTICS
-    # -----------------------------------------------------
-
-    stats = [
+    cards = [
 
         (
             "👥",
             "إجمالي الأعضاء",
             len(members),
-            "",
+            "red",
         ),
 
         (
-            "🛡️",
+            "♜",
             "المشرفين",
             len(supervisors),
-            "stat-pink",
+            "purple",
         ),
 
         (
-            "▣",
+            "✦",
             "أعضاء اليوم",
             today_members,
-            "stat-blue",
+            "blue",
         ),
 
         (
-            "🔗",
+            "⌁",
             "حالة النظام",
-            "متصل" if is_connected else "غير متصل",
-            "stat-green",
+            "متصل"
+            if connected
+            else
+            "غير متصل",
+            "green",
         ),
 
     ]
 
 
-    stats_html = ""
+    card_html = '<div class="k-card-grid">'
 
-    for icon, label, value, css_class in stats:
 
-        stats_html += f"""
-        <div class="stat-card {css_class}">
+    for icon, label, value, color in cards:
 
-            <div class="stat-icon">
+        card_html += f"""
+        <div class="k-card {color}">
+
+            <div class="k-card-icon">
                 {icon}
             </div>
 
-            <div class="stat-label">
+            <div class="k-card-label">
                 {label}
             </div>
 
-            <div class="stat-value">
+            <div class="k-card-value">
                 {value}
             </div>
 
@@ -2229,42 +2164,46 @@ if st.session_state.page == "الرئيسية":
         """
 
 
+    card_html += "</div>"
+
+
     st.markdown(
-        f"""
-        <div class="stats-grid">
-            {stats_html}
-        </div>
-        """,
+        card_html,
         unsafe_allow_html=True,
+    )
+
+
+    st.markdown(
+        '<div class="k-section-title">آخر النشاطات</div>',
+        unsafe_allow_html=True,
+    )
+
+
+    left, right = st.columns(
+        [2.05, 1],
+        gap="medium",
     )
 
 
     # -----------------------------------------------------
-    # MAIN CONTENT
+    # LATEST MEMBERS
     # -----------------------------------------------------
 
-    st.markdown(
-        '<div class="main-grid">',
-        unsafe_allow_html=True,
-    )
+    with left:
 
+        st.markdown(
+            """
+            <div class="k-panel">
+                <div class="k-panel-title">
+                    آخر الأعضاء المضافين
+                </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # LEFT
-    st.markdown(
-        '<div class="panel">',
-        unsafe_allow_html=True,
-    )
-
-
-    st.markdown(
-        '<div class="panel-title">♟ آخر الأعضاء</div>',
-        unsafe_allow_html=True,
-    )
-
-
-    if members:
 
         latest_rows = []
+
 
         for member in members[:10]:
 
@@ -2307,122 +2246,115 @@ if st.session_state.page == "الرئيسية":
             )
 
 
-        st.dataframe(
-            pd.DataFrame(
-                latest_rows
-            ),
-            use_container_width=True,
-            hide_index=True,
-            height=320,
+        if latest_rows:
+
+            st.dataframe(
+                pd.DataFrame(
+                    latest_rows
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=330,
+            )
+
+        else:
+
+            st.info(
+                "لا توجد أعضاء مسجلين حالياً."
+            )
+
+
+        st.markdown(
+            "</div>",
+            unsafe_allow_html=True,
         )
 
-    else:
+
+    # -----------------------------------------------------
+    # INFO
+    # -----------------------------------------------------
+
+    with right:
 
         st.markdown(
             """
-            <div class="empty-state">
+            <div class="k-info">
 
-                <div style="font-size:35px">
-                    ♙
+                <div class="k-info-logo">
+                    KONUHA
                 </div>
 
-                <div>
-                    لا توجد أعضاء مسجلين حالياً
+                <div class="k-info-title">
+                    لوحة تحكم واحدة لكل ما تحتاجه
+                </div>
+
+
+                <div class="k-info-item">
+
+                    <div class="k-info-icon">
+                        👥
+                    </div>
+
+                    <div>
+
+                        <strong>
+                            إدارة الأعضاء
+                        </strong>
+
+                        <span>
+                            إضافة، فحص، عرض وحذف البيانات.
+                        </span>
+
+                    </div>
+
+                </div>
+
+
+                <div class="k-info-item">
+
+                    <div class="k-info-icon">
+                        ♜
+                    </div>
+
+                    <div>
+
+                        <strong>
+                            المشرفون
+                        </strong>
+
+                        <span>
+                            تحديد المسؤولين واستخدامهم في التسجيل.
+                        </span>
+
+                    </div>
+
+                </div>
+
+
+                <div class="k-info-item">
+
+                    <div class="k-info-icon">
+                        ⚡
+                    </div>
+
+                    <div>
+
+                        <strong>
+                            إحصائيات واضحة
+                        </strong>
+
+                        <span>
+                            متابعة الأرقام حسب المشرف والفترة.
+                        </span>
+
+                    </div>
+
                 </div>
 
             </div>
             """,
             unsafe_allow_html=True,
         )
-
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-
-    # RIGHT
-    st.markdown(
-        """
-        <div class="info-card">
-
-            <div class="info-logo">
-                KONUHA
-            </div>
-
-            <div class="info-title">
-                معاً نصنع مجتمعاً أفضل
-            </div>
-
-            <hr style="border-color:rgba(165,91,255,.12)">
-
-            <div class="info-item">
-
-                <div class="info-icon">
-                    👥
-                </div>
-
-                <div>
-                    <strong>
-                        إدارة الأعضاء بسهولة
-                    </strong>
-
-                    <span>
-                        نظام متكامل لإدارة أعضائك
-                    </span>
-                </div>
-
-            </div>
-
-
-            <div class="info-item">
-
-                <div class="info-icon">
-                    🛡️
-                </div>
-
-                <div>
-                    <strong>
-                        أمان ومرونة
-                    </strong>
-
-                    <span>
-                        بياناتك في بيئة آمنة
-                    </span>
-                </div>
-
-            </div>
-
-
-            <div class="info-item">
-
-                <div class="info-icon">
-                    ⚡
-                </div>
-
-                <div>
-                    <strong>
-                        بسرعة وكفاءة
-                    </strong>
-
-                    <span>
-                        لجميع احتياجاتك الإدارية
-                    </span>
-                </div>
-
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
 
 # =========================================================
@@ -2432,7 +2364,7 @@ if st.session_state.page == "الرئيسية":
 elif st.session_state.page == "الأعضاء":
 
     st.markdown(
-        '<div class="section-head">الأعضاء</div>',
+        '<div class="k-section-title">الأعضاء</div>',
         unsafe_allow_html=True,
     )
 
@@ -2440,10 +2372,18 @@ elif st.session_state.page == "الأعضاء":
     search = st.text_input(
         "البحث",
         placeholder="اكتب اللقب أو الرقم...",
+        key="member_search",
     )
 
 
     rows = []
+
+
+    query = (
+        normalize_arabic(search)
+        if search
+        else ""
+    )
 
 
     for member in members:
@@ -2453,32 +2393,43 @@ elif st.session_state.page == "الأعضاء":
             "",
         )
 
-        phone = member.get(
-            "phone",
-            "",
+        phone = str(
+            member.get(
+                "phone",
+                "",
+            )
         )
 
 
         if search:
 
             nickname_match = (
-                normalize_arabic(search)
-                in normalize_arabic(nickname)
+                query
+                in normalize_arabic(
+                    nickname
+                )
             )
 
             phone_match = (
-                search in phone
+                str(search).strip()
+                in phone
             )
 
-            if not nickname_match and not phone_match:
+
+            if (
+                not nickname_match
+                and not phone_match
+            ):
                 continue
 
 
         rows.append(
             {
-                "اللقب": nickname,
+                "اللقب":
+                    nickname,
 
-                "الرقم": phone,
+                "الرقم":
+                    phone,
 
                 "من طرف":
                     supervisor_name(
@@ -2505,6 +2456,12 @@ elif st.session_state.page == "الأعضاء":
         )
 
 
+    st.markdown(
+        '<div class="k-panel">',
+        unsafe_allow_html=True,
+    )
+
+
     if rows:
 
         st.dataframe(
@@ -2520,6 +2477,12 @@ elif st.session_state.page == "الأعضاء":
         )
 
 
+    st.markdown(
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # =========================================================
 # ADD MEMBER
 # =========================================================
@@ -2527,7 +2490,7 @@ elif st.session_state.page == "الأعضاء":
 elif st.session_state.page == "إضافة عضو":
 
     st.markdown(
-        '<div class="section-head">إضافة عضو</div>',
+        '<div class="k-section-title">إضافة عضو جديد</div>',
         unsafe_allow_html=True,
     )
 
@@ -2540,45 +2503,72 @@ elif st.session_state.page == "إضافة عضو":
 
     else:
 
+        active_supervisors = [
+            s
+            for s in supervisors
+            if s.get(
+                "is_active",
+                True,
+            )
+        ]
+
+
+        supervisor_names = [
+            s["name"]
+            for s in active_supervisors
+        ]
+
+
+        st.markdown(
+            '<div class="k-panel">',
+            unsafe_allow_html=True,
+        )
+
+
         with st.form(
             "add_member_form"
         ):
 
-            nickname = st.text_input(
-                "اللقب",
-                placeholder="مثال: ايرن",
-            )
-
-            phone = st.text_input(
-                "الرقم",
-                placeholder="9647XXXXXXXX",
-            )
+            c1, c2 = st.columns(2)
 
 
-            supervisor_names = [
-                supervisor["name"]
-                for supervisor in supervisors
-                if supervisor.get(
-                    "is_active",
-                    True,
+            with c1:
+
+                nickname = st.text_input(
+                    "اللقب",
+                    placeholder="مثال: ايرن",
                 )
-            ]
 
 
-            referrer = st.selectbox(
-                "من طرف",
-                supervisor_names,
-            )
+            with c2:
+
+                phone = st.text_input(
+                    "الرقم",
+                    placeholder="9647XXXXXXXX",
+                )
 
 
-            receiver = st.selectbox(
-                "استقبله",
-                supervisor_names,
-            )
+            c3, c4 = st.columns(2)
+
+
+            with c3:
+
+                referrer = st.selectbox(
+                    "من طرف",
+                    supervisor_names,
+                )
+
+
+            with c4:
+
+                receiver = st.selectbox(
+                    "استقبله",
+                    supervisor_names,
+                )
 
 
             force_add = st.checkbox(
-                "إضافة إجبارية إذا كان هناك لقب مشابه",
+                "إضافة إجبارية إذا كان هناك لقب مشابه"
             )
 
 
@@ -2586,6 +2576,12 @@ elif st.session_state.page == "إضافة عضو":
                 "إضافة العضو",
                 use_container_width=True,
             )
+
+
+        st.markdown(
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
 
         if submit:
@@ -2600,19 +2596,28 @@ elif st.session_state.page == "إضافة عضو":
                     "أكمل جميع البيانات."
                 )
 
-            else:
 
-                # -----------------------------------------
-                # EXACT PHONE DUPLICATE
-                # -----------------------------------------
+            elif supabase is None:
+
+                st.error(
+                    "قاعدة البيانات غير متصلة."
+                )
+
+
+            else:
 
                 try:
 
                     duplicate = (
                         supabase
                         .table("members")
-                        .select("id,nickname,phone")
-                        .eq("phone", phone)
+                        .select(
+                            "id,nickname,phone"
+                        )
+                        .eq(
+                            "phone",
+                            phone,
+                        )
                         .limit(1)
                         .execute()
                         .data
@@ -2623,41 +2628,25 @@ elif st.session_state.page == "إضافة عضو":
                     duplicate = []
 
 
-                # -----------------------------------------
-                # SIMILAR NICKNAMES
-                # -----------------------------------------
+                similar_members = [
 
-                similar_members = []
+                    member.get(
+                        "nickname",
+                        "",
+                    )
 
+                    for member in members
 
-                for member in members:
-
-                    score = similarity(
+                    if similarity(
                         member.get(
                             "nickname",
                             "",
                         ),
                         nickname,
-                    )
+                    ) >= 0.82
 
-                    if score >= 0.82:
+                ]
 
-                        similar_members.append(
-                            {
-                                "nickname":
-                                    member.get(
-                                        "nickname",
-                                        "",
-                                    ),
-                                "score":
-                                    score,
-                            }
-                        )
-
-
-                # -----------------------------------------
-                # DUPLICATE PHONE
-                # -----------------------------------------
 
                 if duplicate:
 
@@ -2667,20 +2656,20 @@ elif st.session_state.page == "إضافة عضو":
                     )
 
 
-                # -----------------------------------------
-                # SIMILAR NICKNAME
-                # -----------------------------------------
-
-                elif similar_members and not force_add:
+                elif (
+                    similar_members
+                    and not force_add
+                ):
 
                     names = ", ".join(
-                        item["nickname"]
-                        for item in similar_members[:5]
+                        similar_members[:5]
                     )
+
 
                     st.warning(
                         f"يوجد لقب مشابه بالفعل: {names}"
                     )
+
 
                     st.info(
                         "إذا كنت متأكداً أن العضو مختلف، "
@@ -2688,17 +2677,13 @@ elif st.session_state.page == "إضافة عضو":
                     )
 
 
-                # -----------------------------------------
-                # INSERT
-                # -----------------------------------------
-
                 else:
 
                     referrer_obj = next(
                         (
-                            supervisor
-                            for supervisor in supervisors
-                            if supervisor["name"]
+                            s
+                            for s in active_supervisors
+                            if s["name"]
                             == referrer
                         ),
                         None,
@@ -2707,20 +2692,24 @@ elif st.session_state.page == "إضافة عضو":
 
                     receiver_obj = next(
                         (
-                            supervisor
-                            for supervisor in supervisors
-                            if supervisor["name"]
+                            s
+                            for s in active_supervisors
+                            if s["name"]
                             == receiver
                         ),
                         None,
                     )
 
 
-                    if not referrer_obj or not receiver_obj:
+                    if (
+                        not referrer_obj
+                        or not receiver_obj
+                    ):
 
                         st.error(
                             "تعذر العثور على المشرف."
                         )
+
 
                     else:
 
@@ -2759,11 +2748,14 @@ elif st.session_state.page == "إضافة عضو":
 
                             clear_database_cache()
 
+
                             st.success(
                                 "تمت إضافة العضو بنجاح."
                             )
 
+
                             st.rerun()
+
 
                         except Exception as error:
 
@@ -2779,50 +2771,56 @@ elif st.session_state.page == "إضافة عضو":
 elif st.session_state.page == "المشرفين":
 
     st.markdown(
-        '<div class="section-head">المشرفين</div>',
+        '<div class="k-section-title">المشرفين</div>',
         unsafe_allow_html=True,
     )
 
 
-    if supervisors:
+    rows = [
 
-        rows = []
+        {
+            "الاسم":
+                s.get(
+                    "name",
+                    "",
+                ),
 
-        for supervisor in supervisors:
+            "اللقب":
+                s.get(
+                    "nickname",
+                    "",
+                ),
 
-            rows.append(
-                {
-                    "الاسم":
-                        supervisor.get(
-                            "name",
-                            "",
-                        ),
+            "الحالة":
+                (
+                    "فعال"
+                    if s.get(
+                        "is_active",
+                        True,
+                    )
+                    else
+                    "متوقف"
+                ),
 
-                    "اللقب":
-                        supervisor.get(
-                            "nickname",
-                            "",
-                        ),
+            "تاريخ الإضافة":
+                s.get(
+                    "created_at",
+                    "",
+                ),
+        }
 
-                    "الحالة":
-                        (
-                            "فعال"
-                            if supervisor.get(
-                                "is_active",
-                                True,
-                            )
-                            else
-                            "متوقف"
-                        ),
+        for s in supervisors
 
-                    "تاريخ الإضافة":
-                        supervisor.get(
-                            "created_at",
-                            "",
-                        ),
-                }
-            )
+    ]
 
+
+    st.markdown(
+        '<div class="k-panel">',
+        unsafe_allow_html=True,
+    )
+
+
+    if rows:
 
         st.dataframe(
             pd.DataFrame(rows),
@@ -2837,6 +2835,12 @@ elif st.session_state.page == "المشرفين":
         )
 
 
+    st.markdown(
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # =========================================================
 # ADD SUPERVISOR
 # =========================================================
@@ -2844,7 +2848,13 @@ elif st.session_state.page == "المشرفين":
 elif st.session_state.page == "إضافة مشرف":
 
     st.markdown(
-        '<div class="section-head">إضافة مشرف</div>',
+        '<div class="k-section-title">إضافة مشرف</div>',
+        unsafe_allow_html=True,
+    )
+
+
+    st.markdown(
+        '<div class="k-panel">',
         unsafe_allow_html=True,
     )
 
@@ -2853,21 +2863,35 @@ elif st.session_state.page == "إضافة مشرف":
         "add_supervisor_form"
     ):
 
-        name = st.text_input(
-            "اسم المشرف",
-            placeholder="مثال: احمد",
-        )
+        c1, c2 = st.columns(2)
 
-        nickname = st.text_input(
-            "لقب المشرف",
-            placeholder="مثال: المشرف العام",
-        )
+
+        with c1:
+
+            name = st.text_input(
+                "اسم المشرف",
+                placeholder="مثال: احمد",
+            )
+
+
+        with c2:
+
+            nickname = st.text_input(
+                "لقب المشرف",
+                placeholder="مثال: المشرف العام",
+            )
 
 
         submit = st.form_submit_button(
             "إضافة المشرف",
             use_container_width=True,
         )
+
+
+    st.markdown(
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
     if submit:
@@ -2882,6 +2906,14 @@ elif st.session_state.page == "إضافة مشرف":
                 "أكمل جميع البيانات."
             )
 
+
+        elif supabase is None:
+
+            st.error(
+                "قاعدة البيانات غير متصلة."
+            )
+
+
         else:
 
             try:
@@ -2889,10 +2921,14 @@ elif st.session_state.page == "إضافة مشرف":
                 existing = (
                     supabase
                     .table("supervisors")
-                    .select("id,name,nickname")
+                    .select(
+                        "id,name,nickname"
+                    )
                     .eq(
                         "normalized_name",
-                        normalize_arabic(name),
+                        normalize_arabic(
+                            name
+                        ),
                     )
                     .limit(1)
                     .execute()
@@ -2905,6 +2941,7 @@ elif st.session_state.page == "إضافة مشرف":
                     st.warning(
                         "يوجد مشرف بهذا الاسم مسبقاً."
                     )
+
 
                 else:
 
@@ -2939,9 +2976,11 @@ elif st.session_state.page == "إضافة مشرف":
 
                     clear_database_cache()
 
+
                     st.success(
                         "تمت إضافة المشرف بنجاح."
                     )
+
 
                     st.rerun()
 
@@ -2960,37 +2999,44 @@ elif st.session_state.page == "إضافة مشرف":
 elif st.session_state.page == "الإحصائيات":
 
     st.markdown(
-        '<div class="section-head">الإحصائيات</div>',
+        '<div class="k-section-title">الإحصائيات</div>',
         unsafe_allow_html=True,
     )
 
 
-    supervisor_filter = st.selectbox(
-        "المشرف",
-        [
-            "الكل"
-        ]
-        +
-        [
-            supervisor["name"]
-            for supervisor in supervisors
-        ],
-    )
+    c1, c2 = st.columns(2)
 
 
-    period = st.selectbox(
-        "الفترة",
-        [
-            "الكل",
-            "اليوم",
-            "امس",
-            "هذا_الشهر",
-            "تاريخ محدد",
-        ],
-    )
+    with c1:
+
+        supervisor_filter = st.selectbox(
+            "المشرف",
+            [
+                "الكل"
+            ]
+            +
+            [
+                s["name"]
+                for s in supervisors
+            ],
+        )
 
 
-    selected_date = None
+    with c2:
+
+        period = st.selectbox(
+            "الفترة",
+            [
+                "الكل",
+                "اليوم",
+                "امس",
+                "هذا_الشهر",
+                "تاريخ محدد",
+            ],
+        )
+
+
+    selected_date = date.today()
 
 
     if period == "تاريخ محدد":
@@ -3008,15 +3054,15 @@ elif st.session_state.page == "الإحصائيات":
 
         if supervisor_filter != "الكل":
 
-            member_supervisor = supervisor_name(
-                supervisors,
-                member.get(
-                    "referrer_id"
-                ),
-            )
-
-            if member_supervisor != supervisor_filter:
-
+            if (
+                supervisor_name(
+                    supervisors,
+                    member.get(
+                        "referrer_id"
+                    ),
+                )
+                != supervisor_filter
+            ):
                 continue
 
 
@@ -3028,46 +3074,46 @@ elif st.session_state.page == "الإحصائيات":
 
 
         if not created_date:
-
             continue
 
 
-        if period == "اليوم":
-
-            if created_date != date.today():
-
-                continue
-
-
-        elif period == "امس":
-
-            if created_date != (
-                date.today()
-                -
-                timedelta(days=1)
-            ):
-
-                continue
+        if (
+            period == "اليوم"
+            and created_date
+            != date.today()
+        ):
+            continue
 
 
-        elif period == "هذا_الشهر":
+        if (
+            period == "امس"
+            and created_date
+            != date.today()
+            - timedelta(days=1)
+        ):
+            continue
+
+
+        if period == "هذا_الشهر":
 
             current = date.today()
 
             if (
-                created_date.year != current.year
+                created_date.year
+                != current.year
                 or
-                created_date.month != current.month
+                created_date.month
+                != current.month
             ):
-
                 continue
 
 
-        elif period == "تاريخ محدد":
-
-            if created_date != selected_date:
-
-                continue
+        if (
+            period == "تاريخ محدد"
+            and created_date
+            != selected_date
+        ):
+            continue
 
 
         filtered_members.append(
@@ -3075,122 +3121,173 @@ elif st.session_state.page == "الإحصائيات":
         )
 
 
-    # -----------------------------------------------------
-    # STAT CARDS
-    # -----------------------------------------------------
+    stat_cards = [
 
-    st.markdown(
-        f"""
-        <div class="stats-grid">
+        (
+            "◉",
+            "النتيجة",
+            len(filtered_members),
+            "red",
+        ),
 
-            <div class="stat-card">
-                <div class="stat-label">
-                    النتيجة
-                </div>
+        (
+            "♜",
+            "المشرف",
+            supervisor_filter,
+            "purple",
+        ),
 
-                <div class="stat-value">
-                    {len(filtered_members)}
-                </div>
+        (
+            "◷",
+            "الفترة",
+            period,
+            "blue",
+        ),
+
+        (
+            "✓",
+            "حالة الاتصال",
+            "متصل"
+            if connected
+            else
+            "غير متصل",
+            "green",
+        ),
+
+    ]
+
+
+    html = '<div class="k-card-grid">'
+
+
+    for (
+        icon,
+        label,
+        value,
+        color,
+    ) in stat_cards:
+
+        value_size = (
+            "22px"
+            if isinstance(
+                value,
+                str,
+            )
+            else
+            "31px"
+        )
+
+
+        html += f"""
+        <div class="k-card {color}">
+
+            <div class="k-card-icon">
+                {icon}
             </div>
 
-
-            <div class="stat-card stat-pink">
-
-                <div class="stat-label">
-                    المشرف
-                </div>
-
-                <div
-                    class="stat-value"
-                    style="font-size:22px"
-                >
-                    {supervisor_filter}
-                </div>
-
+            <div class="k-card-label">
+                {label}
             </div>
 
-
-            <div class="stat-card stat-blue">
-
-                <div class="stat-label">
-                    الفترة
-                </div>
-
-                <div
-                    class="stat-value"
-                    style="font-size:20px"
-                >
-                    {period}
-                </div>
-
+            <div
+                class="k-card-value"
+                style="font-size:{value_size}"
+            >
+                {value}
             </div>
 
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        """
 
 
-    # -----------------------------------------------------
-    # SUPERVISOR BREAKDOWN
-    # -----------------------------------------------------
+    html += "</div>"
+
 
     st.markdown(
-        "<br>",
+        html,
         unsafe_allow_html=True,
     )
 
 
-    if supervisors:
-
-        breakdown = []
-
-
-        for supervisor in supervisors:
-
-            count = 0
+    st.markdown(
+        '<div class="k-section-title">تفصيل المشرفين</div>',
+        unsafe_allow_html=True,
+    )
 
 
-            for member in filtered_members:
-
-                if str(
-                    member.get(
-                        "referrer_id"
-                    )
-                ) == str(
-                    supervisor.get(
-                        "id"
-                    )
-                ):
-
-                    count += 1
+    breakdown = []
 
 
-            breakdown.append(
-                {
-                    "المشرف":
-                        supervisor.get(
-                            "name",
-                            "",
-                        ),
+    for supervisor in supervisors:
 
-                    "اللقب":
-                        supervisor.get(
-                            "nickname",
-                            "",
-                        ),
+        count = sum(
 
-                    "عدد الأعضاء":
-                        count,
-                }
+            1
+
+            for member in filtered_members
+
+            if str(
+                member.get(
+                    "referrer_id"
+                )
+            )
+            ==
+            str(
+                supervisor.get(
+                    "id"
+                )
             )
 
+        )
+
+
+        breakdown.append(
+            {
+                "المشرف":
+                    supervisor.get(
+                        "name",
+                        "",
+                    ),
+
+                "اللقب":
+                    supervisor.get(
+                        "nickname",
+                        "",
+                    ),
+
+                "عدد الأعضاء":
+                    count,
+            }
+        )
+
+
+    st.markdown(
+        '<div class="k-panel">',
+        unsafe_allow_html=True,
+    )
+
+
+    if breakdown:
 
         st.dataframe(
-            pd.DataFrame(breakdown),
+            pd.DataFrame(
+                breakdown
+            ),
             use_container_width=True,
             hide_index=True,
         )
+
+    else:
+
+        st.info(
+            "لا توجد بيانات."
+        )
+
+
+    st.markdown(
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # =========================================================
@@ -3200,53 +3297,52 @@ elif st.session_state.page == "الإحصائيات":
 elif st.session_state.page == "التصدير":
 
     st.markdown(
-        '<div class="section-head">التصدير</div>',
+        '<div class="k-section-title">التصدير</div>',
         unsafe_allow_html=True,
     )
 
 
-    export_rows = []
+    export_rows = [
 
+        {
+            "اللقب":
+                m.get(
+                    "nickname",
+                    "",
+                ),
 
-    for member in members:
+            "الرقم":
+                m.get(
+                    "phone",
+                    "",
+                ),
 
-        export_rows.append(
-            {
-                "اللقب":
-                    member.get(
-                        "nickname",
-                        "",
+            "من طرف":
+                supervisor_name(
+                    supervisors,
+                    m.get(
+                        "referrer_id"
                     ),
+                ),
 
-                "الرقم":
-                    member.get(
-                        "phone",
-                        "",
+            "استقبله":
+                supervisor_name(
+                    supervisors,
+                    m.get(
+                        "receiver_id"
                     ),
+                ),
 
-                "من طرف":
-                    supervisor_name(
-                        supervisors,
-                        member.get(
-                            "referrer_id"
-                        ),
-                    ),
+            "تاريخ الإضافة":
+                m.get(
+                    "created_at",
+                    "",
+                ),
+        }
 
-                "استقبله":
-                    supervisor_name(
-                        supervisors,
-                        member.get(
-                            "receiver_id"
-                        ),
-                    ),
+        for m in members
 
-                "تاريخ الإضافة":
-                    member.get(
-                        "created_at",
-                        "",
-                    ),
-            }
-        )
+    ]
 
 
     export_df = pd.DataFrame(
@@ -3255,16 +3351,24 @@ elif st.session_state.page == "التصدير":
 
 
     st.markdown(
-        "### تحميل البيانات",
+        '<div class="k-panel">',
+        unsafe_allow_html=True,
     )
 
 
-    # CSV
+    st.markdown(
+        "### تحميل البيانات"
+    )
 
-    csv_data = export_df.to_csv(
-        index=False
-    ).encode(
-        "utf-8-sig"
+
+    csv_data = (
+        export_df
+        .to_csv(
+            index=False
+        )
+        .encode(
+            "utf-8-sig"
+        )
     )
 
 
@@ -3276,8 +3380,6 @@ elif st.session_state.page == "التصدير":
         use_container_width=True,
     )
 
-
-    # EXCEL
 
     excel_buffer = io.BytesIO()
 
@@ -3306,8 +3408,6 @@ elif st.session_state.page == "التصدير":
     )
 
 
-    # PDF
-
     try:
 
         from reportlab.lib.pagesizes import A4
@@ -3315,6 +3415,7 @@ elif st.session_state.page == "التصدير":
 
 
         pdf_buffer = io.BytesIO()
+
 
         pdf = canvas.Canvas(
             pdf_buffer,
@@ -3332,6 +3433,7 @@ elif st.session_state.page == "التصدير":
             20,
         )
 
+
         pdf.drawString(
             50,
             y,
@@ -3341,6 +3443,7 @@ elif st.session_state.page == "التصدير":
 
         y -= 40
 
+
         pdf.setFont(
             "Helvetica",
             9,
@@ -3349,23 +3452,10 @@ elif st.session_state.page == "التصدير":
 
         for member in members:
 
-            nickname = str(
-                member.get(
-                    "nickname",
-                    "",
-                )
-            )
-
-            phone = str(
-                member.get(
-                    "phone",
-                    "",
-                )
-            )
-
-
             line = (
-                f"{nickname} | {phone}"
+                f"{member.get('nickname','')}"
+                f" | "
+                f"{member.get('phone','')}"
             )
 
 
@@ -3406,8 +3496,15 @@ elif st.session_state.page == "التصدير":
     except Exception:
 
         st.info(
-            "PDF غير متاح حالياً. تأكد من وجود reportlab."
+            "PDF غير متاح حالياً. "
+            "تأكد من وجود reportlab."
         )
+
+
+    st.markdown(
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # =========================================================
@@ -3417,7 +3514,7 @@ elif st.session_state.page == "التصدير":
 elif st.session_state.page == "الحذف":
 
     st.markdown(
-        '<div class="section-head">حذف عضو</div>',
+        '<div class="k-section-title">حذف عضو</div>',
         unsafe_allow_html=True,
     )
 
@@ -3428,14 +3525,15 @@ elif st.session_state.page == "الحذف":
             "لا توجد أعضاء للحذف."
         )
 
+
     else:
 
         member_options = [
-            member.get(
+            m.get(
                 "nickname",
                 "",
             )
-            for member in members
+            for m in members
         ]
 
 
@@ -3447,9 +3545,9 @@ elif st.session_state.page == "الحذف":
 
         selected_member = next(
             (
-                member
-                for member in members
-                if member.get(
+                m
+                for m in members
+                if m.get(
                     "nickname"
                 )
                 == selected_nickname
@@ -3462,45 +3560,65 @@ elif st.session_state.page == "الحذف":
 
             st.markdown(
                 f"""
-                <div class="panel">
+                <div
+                    class="k-panel"
+                    style="
+                        direction:rtl;
+                        text-align:right;
+                    "
+                >
 
-                    <div class="panel-title">
+                    <div class="k-panel-title">
                         معلومات العضو
                     </div>
 
-                    <p style="font-family:Cairo">
+                    <div
+                        style="
+                            color:#c8ccd9;
+                            font:
+                                500 13px
+                                'KonohaCairo',
+                                Cairo,
+                                sans-serif;
+                            line-height:2.1;
+                        "
+                    >
+
                         <b>اللقب:</b>
-                        {selected_member.get("nickname","")}
-                    </p>
+                        {selected_member.get(
+                            "nickname",
+                            ""
+                        )}
 
-                    <p style="font-family:Cairo">
+                        <br>
+
                         <b>الرقم:</b>
-                        {selected_member.get("phone","")}
-                    </p>
+                        {selected_member.get(
+                            "phone",
+                            ""
+                        )}
 
-                    <p style="font-family:Cairo">
+                        <br>
+
                         <b>من طرف:</b>
-                        {
-                            supervisor_name(
-                                supervisors,
-                                selected_member.get(
-                                    "referrer_id"
-                                )
+                        {supervisor_name(
+                            supervisors,
+                            selected_member.get(
+                                "referrer_id"
                             )
-                        }
-                    </p>
+                        )}
 
-                    <p style="font-family:Cairo">
+                        <br>
+
                         <b>استقبله:</b>
-                        {
-                            supervisor_name(
-                                supervisors,
-                                selected_member.get(
-                                    "receiver_id"
-                                )
+                        {supervisor_name(
+                            supervisors,
+                            selected_member.get(
+                                "receiver_id"
                             )
-                        }
-                    </p>
+                        )}
+
+                    </div>
 
                 </div>
                 """,
@@ -3508,14 +3626,8 @@ elif st.session_state.page == "الحذف":
             )
 
 
-        st.markdown(
-            "<br>",
-            unsafe_allow_html=True,
-        )
-
-
         confirm_delete = st.checkbox(
-            "أؤكد أنني أريد حذف هذا العضو نهائياً",
+            "أؤكد أنني أريد حذف هذا العضو نهائياً"
         )
 
 
@@ -3533,7 +3645,11 @@ elif st.session_state.page == "الحذف":
                     "فعّل التأكيد أولاً."
                 )
 
-            elif selected_member:
+
+            elif (
+                selected_member
+                and supabase is not None
+            ):
 
                 try:
 
@@ -3543,7 +3659,9 @@ elif st.session_state.page == "الحذف":
                         .delete()
                         .eq(
                             "id",
-                            selected_member["id"],
+                            selected_member[
+                                "id"
+                            ],
                         )
                         .execute()
                     )
@@ -3567,6 +3685,8 @@ elif st.session_state.page == "الحذف":
                     )
 
 
-# =========================================================
-# END
-# =========================================================
+            elif supabase is None:
+
+                st.error(
+                    "قاعدة البيانات غير متصلة."
+                )
