@@ -4,3 +4,5 @@ pandas
 openpyxl
 reportlab
 Pillow
+arabic-reshaper
+python-bidi
