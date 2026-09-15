@@ -1,18 +1,16 @@
-import streamlit as st
-import pandas as pd
 import io
 import re
-import base64
 import unicodedata
-from pathlib import Path
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
-from datetime import datetime, date, timedelta
 
+import pandas as pd
+import streamlit as st
 from supabase import create_client
 
 
 # =========================================================
-# KONUHA — نظام إدارة الأعضاء والمشرفين
+# KONUHA
 # =========================================================
 
 st.set_page_config(
@@ -22,10 +20,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-BASE_DIR = Path(__file__).parent
-ASSETS_DIR = BASE_DIR / "assets"
-FONTS_DIR = BASE_DIR / "fonts"
-LEAF_PATH = ASSETS_DIR / "naruto_leaf.png"
+
+# =========================================================
+# SETTINGS
+# =========================================================
 
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
@@ -33,25 +31,88 @@ SITE_PASSWORD = st.secrets.get("SITE_PASSWORD", "")
 
 
 # =========================================================
-# HELPERS
+# DATABASE
 # =========================================================
 
-def file_to_base64(path: Path):
+@st.cache_resource
+def get_db():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+
     try:
-        if path.exists():
-            return base64.b64encode(path.read_bytes()).decode("utf-8")
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception:
-        pass
-    return ""
+        return None
 
 
-LEAF_BASE64 = file_to_base64(LEAF_PATH)
+db = get_db()
 
+
+@st.cache_data(ttl=15)
+def get_members():
+    if db is None:
+        return []
+
+    try:
+        response = (
+            db.table("members")
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return response.data or []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=15)
+def get_supervisors():
+    if db is None:
+        return []
+
+    try:
+        response = (
+            db.table("supervisors")
+            .select("*")
+            .order("created_at")
+            .execute()
+        )
+        return response.data or []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=15)
+def check_database_connection():
+    if db is None:
+        return False
+
+    try:
+        db.table("supervisors").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def clear_cache():
+    get_members.clear()
+    get_supervisors.clear()
+    check_database_connection.clear()
+
+
+# =========================================================
+# TEXT HELPERS
+# =========================================================
 
 def normalize_arabic(text):
     text = str(text or "").strip().lower()
+
     text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+
+    text = "".join(
+        char for char in text
+        if not unicodedata.combining(char)
+    )
 
     replacements = {
         "أ": "ا",
@@ -68,10 +129,7 @@ def normalize_arabic(text):
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    text = re.sub(r"[\s_\-.]+", "", text)
-    text = re.sub(r"[^\w\u0600-\u06ff]+", "", text)
-
-    return text
+    return re.sub(r"[^\w\u0600-\u06ff]+", "", text)
 
 
 def similarity(a, b):
@@ -84,18 +142,26 @@ def similarity(a, b):
 
 def parse_date(value):
     try:
-        if not value:
-            return None
-
         return datetime.fromisoformat(
             str(value).replace("Z", "+00:00")
         ).date()
-
     except Exception:
         return None
 
 
-def supervisor_name(supervisors, supervisor_id):
+def get_supervisor_by_name(supervisors, name):
+    target = normalize_arabic(name)
+
+    for supervisor in supervisors:
+        if normalize_arabic(
+            supervisor.get("name", "")
+        ) == target:
+            return supervisor
+
+    return None
+
+
+def get_supervisor_name(supervisors, supervisor_id):
     for supervisor in supervisors:
         if str(supervisor.get("id")) == str(supervisor_id):
             return supervisor.get("name", "-")
@@ -103,1727 +169,305 @@ def supervisor_name(supervisors, supervisor_id):
     return "-"
 
 
-def font_file(keyword, weight_words):
-    normalized_keyword = (
-        keyword
-        .lower()
-        .replace("_", "")
-        .replace("-", "")
-        .replace(" ", "")
-    )
+def find_similar_members(members, nickname):
+    normalized = normalize_arabic(nickname)
 
-    for path in FONTS_DIR.glob("*.ttf"):
-        name = (
-            path.name
-            .lower()
-            .replace("_", "")
-            .replace("-", "")
-            .replace(" ", "")
+    matches = []
+
+    for member in members:
+        existing = normalize_arabic(
+            member.get("nickname", "")
         )
+
+        if not existing:
+            continue
+
+        score = similarity(normalized, existing)
 
         if (
-            normalized_keyword in name
-            and any(word in name for word in weight_words)
+            score >= 0.82
+            and normalized != existing
         ):
-            return path
+            matches.append(member)
 
-    return None
-
-
-def font_face(keyword, family, weight_words, css_weight):
-    path = font_file(
-        keyword,
-        weight_words,
-    )
-
-    if not path:
-        return ""
-
-    data = file_to_base64(path)
-
-    if not data:
-        return ""
-
-    return (
-        f"@font-face{{"
-        f"font-family:'{family}';"
-        f"font-style:normal;"
-        f"font-weight:{css_weight};"
-        f"src:url(data:font/ttf;base64,{data}) "
-        f"format('truetype');"
-        f"}}"
-    )
-
-
-def build_font_css():
-    regular_words = [
-        "regular",
-        "normal",
-        "400",
-    ]
-
-    medium_words = [
-        "medium",
-        "500",
-    ]
-
-    semibold_words = [
-        "semibold",
-        "600",
-    ]
-
-    bold_words = [
-        "bold",
-        "700",
-        "800",
-    ]
-
-    css = []
-
-    for keyword, family in [
-        ("Cairo", "KonohaCairo"),
-        ("Inter", "KonohaInter"),
-        ("ReadexPro", "KonohaReadex"),
-        ("Readex_Pro", "KonohaReadex"),
-    ]:
-
-        css.extend(
-            [
-                font_face(
-                    keyword,
-                    family,
-                    regular_words,
-                    400,
-                ),
-                font_face(
-                    keyword,
-                    family,
-                    medium_words,
-                    500,
-                ),
-                font_face(
-                    keyword,
-                    family,
-                    semibold_words,
-                    600,
-                ),
-                font_face(
-                    keyword,
-                    family,
-                    bold_words,
-                    700,
-                ),
-            ]
-        )
-
-    return "\n".join(
-        dict.fromkeys(css)
-    )
-
-
-FONT_CSS = build_font_css()
+    return matches
 
 
 # =========================================================
-# DATABASE
-# =========================================================
-
-@st.cache_resource
-def get_database():
-
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return None
-
-    try:
-        return create_client(
-            SUPABASE_URL,
-            SUPABASE_KEY,
-        )
-
-    except Exception:
-        return None
-
-
-supabase = get_database()
-
-
-@st.cache_data(ttl=20)
-def check_connection():
-
-    try:
-
-        if supabase is None:
-            return False
-
-        (
-            supabase
-            .table("supervisors")
-            .select("id")
-            .limit(1)
-            .execute()
-        )
-
-        return True
-
-    except Exception:
-        return False
-
-
-@st.cache_data(ttl=15)
-def load_members():
-
-    try:
-
-        if supabase is None:
-            return []
-
-        response = (
-            supabase
-            .table("members")
-            .select("*")
-            .order(
-                "created_at",
-                desc=True,
-            )
-            .execute()
-        )
-
-        return response.data or []
-
-    except Exception:
-        return []
-
-
-@st.cache_data(ttl=15)
-def load_supervisors():
-
-    try:
-
-        if supabase is None:
-            return []
-
-        response = (
-            supabase
-            .table("supervisors")
-            .select("*")
-            .order("created_at")
-            .execute()
-        )
-
-        return response.data or []
-
-    except Exception:
-        return []
-
-
-def clear_database_cache():
-
-    for fn in (
-        load_members,
-        load_supervisors,
-        check_connection,
-    ):
-
-        try:
-            fn.clear()
-
-        except Exception:
-            pass
-
-
-# =========================================================
-# VISUAL SYSTEM
+# CSS
+# IMPORTANT:
+# CSS فقط - بدون HTML wrappers حول Streamlit widgets
 # =========================================================
 
 st.markdown(
-    f"""
-<style>
-
-{FONT_CSS}
-
-:root {{
-    --bg: #05060b;
-    --surface: #0a0c14;
-    --surface-2: #0f1220;
-    --surface-3: #151827;
-
-    --text: #f7f8ff;
-    --muted: #9298ab;
-
-    --red: #ff3158;
-    --red-2: #b70f35;
-
-    --purple: #8b5cff;
-    --pink: #e948a4;
-
-    --green: #42e6a1;
-
-    --line: rgba(255,255,255,.08);
-}}
-
-
-/* =====================================================
-   GLOBAL
-   ===================================================== */
-
-* {{
-    box-sizing: border-box;
-}}
-
-html,
-body,
-[data-testid="stApp"],
-[data-testid="stAppViewContainer"],
-[data-testid="stMain"] {{
-
-    background:
-        radial-gradient(
-            900px 500px at 92% -8%,
-            rgba(255,49,88,.11),
-            transparent 62%
-        ),
-        radial-gradient(
-            800px 600px at 5% 30%,
-            rgba(139,92,255,.09),
-            transparent 64%
-        ),
-        #05060b !important;
-
-    color:
-        var(--text) !important;
-}}
-
-
-[data-testid="stHeader"],
-#MainMenu,
-footer {{
-
-    display:
-        none !important;
-}}
-
-
-[data-testid="stToolbar"] {{
-
-    display:
-        none !important;
-}}
-
-
-.block-container {{
-
-    max-width:
-        1480px !important;
-
-    padding:
-        18px 28px 60px !important;
-}}
-
-
-/* =====================================================
-   TOP
-   ===================================================== */
-
-.k-top {{
-
-    display:
-        flex;
-
-    align-items:
-        center;
-
-    justify-content:
-        space-between;
-
-    gap:
-        18px;
-
-    margin-bottom:
-        16px;
-}}
-
-
-.k-brand {{
-
-    display:
-        flex;
-
-    align-items:
-        center;
-
-    gap:
-        10px;
-
-    min-width:
-        180px;
-}}
-
-
-.k-brand-mark {{
-
-    width:
-        42px;
-
-    height:
-        42px;
-
-    border-radius:
-        13px;
-
-    display:
-        grid;
-
-    place-items:
-        center;
-
-    background:
-        linear-gradient(
-            145deg,
-            #ff3158,
-            #8b2cff
-        );
-
-    box-shadow:
-        0 0 28px
-        rgba(255,49,88,.22);
-
-    font:
-        800 18px
-        'KonohaInter',
-        Inter,
-        sans-serif;
-
-    color:
-        #fff;
-}}
-
-
-.k-brand-name {{
-
-    font:
-        800 22px
-        'KonohaInter',
-        Inter,
-        sans-serif;
-
-    letter-spacing:
-        1px;
-}}
-
-
-.k-brand-sub {{
-
-    color:
-        var(--muted);
-
-    font:
-        500 10px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-
-    margin-top:
-        -2px;
-}}
-
-
-.k-status {{
-
-    display:
-        inline-flex;
-
-    align-items:
-        center;
-
-    gap:
-        8px;
-
-    padding:
-        8px 13px;
-
-    border:
-        1px solid
-        var(--line);
-
-    border-radius:
-        999px;
-
-    background:
-        rgba(255,255,255,.035);
-
-    font:
-        600 11px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-
-    white-space:
-        nowrap;
-}}
-
-
-.k-status.online {{
-
-    color:
-        #6af0b3;
-
-    border-color:
-        rgba(66,230,161,.22);
-}}
-
-
-.k-status.offline {{
-
-    color:
-        #ff8297;
-
-    border-color:
-        rgba(255,49,88,.25);
-}}
-
-
-/* =====================================================
-   NAVIGATION
-   ===================================================== */
-
-div.stButton > button {{
-
-    min-height:
-        42px;
-
-    border-radius:
-        12px !important;
-
-    border:
-        1px solid
-        rgba(255,255,255,.07) !important;
-
-    background:
-        rgba(255,255,255,.035) !important;
-
-    color:
-        #bfc3d2 !important;
-
-    font:
-        600 12px
-        'KonohaCairo',
-        Cairo,
-        sans-serif !important;
-
-    transition:
-        all .18s ease !important;
-
-    box-shadow:
-        none !important;
-}}
-
-
-div.stButton > button:hover {{
-
-    color:
-        #fff !important;
-
-    border-color:
-        rgba(255,49,88,.28) !important;
-
-    background:
-        linear-gradient(
-            135deg,
-            rgba(255,49,88,.14),
-            rgba(139,92,255,.10)
-        ) !important;
-
-    transform:
-        translateY(-1px);
-}}
-
-
-.k-nav-active + div.stButton > button {{
-
-    color:
-        #fff !important;
-
-    border-color:
-        rgba(255,49,88,.38) !important;
-
-    background:
-        linear-gradient(
-            135deg,
-            rgba(255,49,88,.22),
-            rgba(139,92,255,.16)
-        ) !important;
-
-    box-shadow:
-        0 0 22px
-        rgba(255,49,88,.08) !important;
-}}
-
-
-/* =====================================================
-   HERO
-   ===================================================== */
-
-.k-hero {{
-
-    position:
-        relative;
-
-    overflow:
-        hidden;
-
-    min-height:
-        360px;
-
-    border-radius:
-        30px;
-
-    border:
-        1px solid
-        rgba(255,255,255,.09);
-
-    padding:
-        48px 50px;
-
-    background:
-
-        radial-gradient(
-            circle at 80% 45%,
-            rgba(255,49,88,.22),
-            transparent 25%
-        ),
-
-        radial-gradient(
-            circle at 68% 90%,
-            rgba(139,92,255,.17),
-            transparent 34%
-        ),
-
-        linear-gradient(
-            135deg,
-            #090b12 0%,
-            #0d101b 52%,
-            #150b16 100%
-        );
-
-    box-shadow:
-
-        0 30px 90px
-        rgba(0,0,0,.48),
-
-        inset 0 1px
-        rgba(255,255,255,.035);
-}}
-
-
-.k-hero::before {{
-
-    content:
-        "";
-
-    position:
-        absolute;
-
-    inset:
-        0;
-
-    opacity:
-        .18;
-
-    background-image:
-
-        linear-gradient(
-            rgba(255,255,255,.04) 1px,
-            transparent 1px
-        ),
-
-        linear-gradient(
+    """
+    <style>
+
+    @import url(
+        'https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800'
+        '&family=Inter:wght@500;600;700;800'
+        '&family=Readex+Pro:wght@500;600;700&display=swap'
+    );
+
+    :root {
+        --bg: #070812;
+        --panel: #101326;
+        --panel2: #14182f;
+        --line: rgba(177, 91, 255, 0.18);
+        --purple: #a85cff;
+        --pink: #ec59b8;
+        --text: #f7f4ff;
+        --muted: #9b9ab0;
+        --green: #55e5a0;
+        --red: #ff7187;
+    }
+
+    * {
+        box-sizing: border-box;
+    }
+
+    html,
+    body,
+    [data-testid="stAppViewContainer"] {
+        background:
+            radial-gradient(
+                900px 500px at 85% -10%,
+                rgba(168, 92, 255, 0.16),
+                transparent 65%
+            ),
+            radial-gradient(
+                700px 450px at 0% 100%,
+                rgba(236, 89, 184, 0.08),
+                transparent 65%
+            ),
+            var(--bg) !important;
+    }
+
+    [data-testid="stHeader"] {
+        display: none !important;
+    }
+
+    #MainMenu {
+        display: none !important;
+    }
+
+    footer {
+        display: none !important;
+    }
+
+    [data-testid="stToolbar"] {
+        display: none !important;
+    }
+
+    [data-testid="stDecoration"] {
+        display: none !important;
+    }
+
+    .block-container {
+        max-width: 1450px !important;
+        padding: 25px 28px 55px !important;
+    }
+
+    body,
+    .stApp {
+        color: var(--text) !important;
+        font-family: Cairo, sans-serif !important;
+    }
+
+    .stButton > button {
+        min-height: 44px !important;
+        border-radius: 14px !important;
+        border: 1px solid rgba(168, 92, 255, 0.22) !important;
+        background: rgba(18, 21, 42, 0.9) !important;
+        color: #e9e5f5 !important;
+        font-family: Cairo, sans-serif !important;
+        transition: 0.2s ease !important;
+    }
+
+    .stButton > button:hover {
+        border-color: rgba(236, 89, 184, 0.5) !important;
+        background:
+            linear-gradient(
+                135deg,
+                rgba(168, 92, 255, 0.18),
+                rgba(236, 89, 184, 0.10)
+            ) !important;
+        transform: translateY(-1px);
+    }
+
+    .stTextInput input,
+    .stNumberInput input,
+    .stTextArea textarea {
+        background: #0d1020 !important;
+        border: 1px solid rgba(168, 92, 255, 0.18) !important;
+        color: white !important;
+        border-radius: 13px !important;
+        font-family: Cairo, sans-serif !important;
+    }
+
+    div[data-baseweb="select"] {
+        background: #0d1020 !important;
+        border-radius: 13px !important;
+        font-family: Cairo, sans-serif !important;
+    }
+
+    div[data-baseweb="select"] * {
+        color: white !important;
+    }
+
+    [data-testid="stMetric"] {
+        background:
+            linear-gradient(
+                145deg,
+                #12162c,
+                #0c0f20
+            ) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 20px !important;
+        padding: 18px !important;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: var(--muted) !important;
+        font-family: Cairo !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: white !important;
+        font-family: Inter !important;
+    }
+
+    .stDataFrame {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        overflow: hidden;
+    }
+
+    hr {
+        border-color: rgba(168, 92, 255, 0.14) !important;
+    }
+
+    h1,
+    h2,
+    h3 {
+        font-family: Readex Pro, Cairo, sans-serif !important;
+    }
+
+    .konuha-login-title {
+        text-align: center;
+        font-family: Readex Pro, Cairo, sans-serif;
+        font-size: 52px;
+        font-weight: 800;
+        margin-bottom: 8px;
+        background: linear-gradient(
             90deg,
-            rgba(255,255,255,.04) 1px,
-            transparent 1px
+            #ffffff,
+            #c48cff,
+            #ef6abd
         );
-
-    background-size:
-        45px 45px;
-
-    mask-image:
-        linear-gradient(
-            to right,
-            black,
-            transparent 75%
-        );
-
-    pointer-events:
-        none;
-}}
-
-
-.k-orb {{
-
-    position:
-        absolute;
-
-    width:
-        300px;
-
-    height:
-        300px;
-
-    right:
-        8%;
-
-    top:
-        50%;
-
-    transform:
-        translateY(-50%);
-
-    border-radius:
-        50%;
-
-    background:
-
-        radial-gradient(
-            circle,
-            rgba(255,49,88,.22),
-            rgba(139,92,255,.08) 42%,
-            transparent 70%
-        );
-
-    filter:
-        blur(4px);
-
-    pointer-events:
-        none;
-}}
-
-
-.k-hero-art {{
-
-    position:
-        absolute;
-
-    right:
-        3%;
-
-    bottom:
-        -70px;
-
-    width:
-        430px;
-
-    height:
-        430px;
-
-    opacity:
-        .46;
-
-    border-radius:
-        50%;
-
-    background:
-
-        radial-gradient(
-            circle at 50% 35%,
-            rgba(255,255,255,.12) 0 7%,
-            transparent 7.5%
-        ),
-
-        radial-gradient(
-            ellipse at 50% 52%,
-            rgba(18,20,34,.98) 0 25%,
-            transparent 25.7%
-        ),
-
-        radial-gradient(
-            ellipse at 50% 80%,
-            rgba(11,13,24,.98) 0 38%,
-            transparent 38.7%
-        );
-
-    filter:
-        drop-shadow(
-            0 0 55px
-            rgba(255,49,88,.15)
-        );
-
-    pointer-events:
-        none;
-}}
-
-
-.k-hero-content {{
-
-    position:
-        relative;
-
-    z-index:
-        3;
-
-    max-width:
-        690px;
-
-    direction:
-        rtl;
-
-    text-align:
-        right;
-}}
-
-
-.k-eyebrow {{
-
-    display:
-        inline-flex;
-
-    align-items:
-        center;
-
-    gap:
-        8px;
-
-    padding:
-        7px 11px;
-
-    border-radius:
-        999px;
-
-    border:
-        1px solid
-        rgba(255,255,255,.08);
-
-    background:
-        rgba(255,255,255,.035);
-
-    color:
-        #bfc4d5;
-
-    font:
-        600 11px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-.k-eyebrow i {{
-
-    width:
-        6px;
-
-    height:
-        6px;
-
-    border-radius:
-        50%;
-
-    background:
-        var(--red);
-
-    box-shadow:
-        0 0 12px
-        var(--red);
-}}
-
-
-.k-hero-title {{
-
-    margin-top:
-        20px;
-
-    font:
-        900 78px/1
-        'KonohaInter',
-        Inter,
-        sans-serif;
-
-    letter-spacing:
-        3px;
-
-    background:
-
-        linear-gradient(
-            105deg,
-            #fff 10%,
-            #ff7b92 52%,
-            #9d6cff 95%
-        );
-
-    -webkit-background-clip:
-        text;
-
-    background-clip:
-        text;
-
-    color:
-        transparent;
-
-    filter:
-        drop-shadow(
-            0 0 30px
-            rgba(255,49,88,.14)
-        );
-}}
-
-
-.k-hero-sub {{
-
-    margin-top:
-        14px;
-
-    color:
-        #c4c8d6;
-
-    font:
-        500 17px/1.9
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-.k-hero-quote {{
-
-    margin-top:
-        24px;
-
-    color:
-        #f4f4fb;
-
-    font:
-        700 14px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-.k-hero-line {{
-
-    width:
-        80px;
-
-    height:
-        3px;
-
-    margin-top:
-        13px;
-
-    border-radius:
-        10px;
-
-    background:
-        linear-gradient(
-            90deg,
-            var(--red),
-            var(--purple)
-        );
-
-    box-shadow:
-        0 0 18px
-        rgba(255,49,88,.35);
-}}
-
-
-/* =====================================================
-   SECTION TITLES
-   ===================================================== */
-
-.k-section-title {{
-
-    margin:
-        28px 0 13px;
-
-    font:
-        800 21px
-        'KonohaReadex',
-        'KonohaCairo',
-        sans-serif;
-
-    color:
-        #fff;
-
-    direction:
-        rtl;
-
-    text-align:
-        right;
-}}
-
-
-/* =====================================================
-   STAT CARDS
-   ===================================================== */
-
-.k-card-grid {{
-
-    display:
-        grid;
-
-    grid-template-columns:
-        repeat(
-            4,
-            minmax(0,1fr)
-        );
-
-    gap:
-        14px;
-}}
-
-
-.k-card {{
-
-    position:
-        relative;
-
-    min-height:
-        145px;
-
-    overflow:
-        hidden;
-
-    padding:
-        20px;
-
-    border-radius:
-        21px;
-
-    border:
-        1px solid
-        rgba(255,255,255,.075);
-
-    background:
-
-        linear-gradient(
-            145deg,
-            rgba(20,23,37,.92),
-            rgba(8,10,18,.92)
-        );
-
-    box-shadow:
-        0 20px 55px
-        rgba(0,0,0,.28);
-
-    direction:
-        rtl;
-
-    text-align:
-        right;
-}}
-
-
-.k-card::after {{
-
-    content:
-        "";
-
-    position:
-        absolute;
-
-    width:
-        130px;
-
-    height:
-        130px;
-
-    right:
-        -55px;
-
-    bottom:
-        -65px;
-
-    border-radius:
-        50%;
-
-    background:
-        rgba(255,49,88,.12);
-
-    filter:
-        blur(25px);
-}}
-
-
-.k-card.red {{
-    border-color:
-        rgba(255,49,88,.20);
-}}
-
-
-.k-card.purple {{
-    border-color:
-        rgba(139,92,255,.20);
-}}
-
-
-.k-card.green {{
-    border-color:
-        rgba(66,230,161,.20);
-}}
-
-
-.k-card.blue {{
-    border-color:
-        rgba(63,191,255,.18);
-}}
-
-
-.k-card-icon {{
-
-    width:
-        45px;
-
-    height:
-        45px;
-
-    display:
-        grid;
-
-    place-items:
-        center;
-
-    border-radius:
-        14px;
-
-    background:
-        rgba(255,255,255,.05);
-
-    font-size:
-        19px;
-}}
-
-
-.k-card-label {{
-
-    margin-top:
-        17px;
-
-    color:
-        #9398ab;
-
-    font:
-        600 11px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-.k-card-value {{
-
-    margin-top:
-        3px;
-
-    color:
-        #fff;
-
-    font:
-        900 31px
-        'KonohaInter',
-        Inter,
-        sans-serif;
-}}
-
-
-.k-card.red .k-card-value {{
-    color:
-        #ff6a83;
-}}
-
-
-.k-card.purple .k-card-value {{
-    color:
-        #b28dff;
-}}
-
-
-.k-card.green .k-card-value {{
-    color:
-        #68edb1;
-}}
-
-
-.k-card.blue .k-card-value {{
-    color:
-        #73d6ff;
-}}
-
-
-/* =====================================================
-   PANELS
-   ===================================================== */
-
-.k-panel {{
-
-    border:
-        1px solid
-        rgba(255,255,255,.07);
-
-    border-radius:
-        24px;
-
-    padding:
-        22px;
-
-    background:
-        rgba(8,10,18,.78);
-
-    box-shadow:
-        0 22px 60px
-        rgba(0,0,0,.25);
-}}
-
-
-.k-panel-title {{
-
-    margin-bottom:
-        14px;
-
-    color:
-        #fff;
-
-    font:
-        700 17px
-        'KonohaReadex',
-        'KonohaCairo',
-        sans-serif;
-
-    direction:
-        rtl;
-
-    text-align:
-        right;
-}}
-
-
-/* =====================================================
-   INFO
-   ===================================================== */
-
-.k-info {{
-
-    border-radius:
-        24px;
-
-    padding:
-        28px;
-
-    min-height:
-        360px;
-
-    border:
-        1px solid
-        rgba(255,49,88,.20);
-
-    background:
-
-        radial-gradient(
-            circle at 50% 0%,
-            rgba(255,49,88,.14),
-            transparent 38%
-        ),
-
-        linear-gradient(
-            145deg,
-            #0e111d,
-            #090b13
-        );
-
-    text-align:
-        center;
-}}
-
-
-.k-info-logo {{
-
-    font:
-        900 36px
-        'KonohaInter',
-        Inter,
-        sans-serif;
-
-    background:
-
-        linear-gradient(
-            90deg,
-            #fff,
-            #ff6d87,
-            #9d6cff
-        );
-
-    -webkit-background-clip:
-        text;
-
-    background-clip:
-        text;
-
-    color:
-        transparent;
-}}
-
-
-.k-info-title {{
-
-    margin-top:
-        7px;
-
-    color:
-        #d9dbe5;
-
-    font:
-        600 13px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-.k-info-item {{
-
-    display:
-        flex;
-
-    align-items:
-        center;
-
-    gap:
-        12px;
-
-    margin:
-        22px 0;
-
-    direction:
-        rtl;
-
-    text-align:
-        right;
-}}
-
-
-.k-info-icon {{
-
-    width:
-        43px;
-
-    height:
-        43px;
-
-    flex:
-        0 0 43px;
-
-    display:
-        grid;
-
-    place-items:
-        center;
-
-    border-radius:
-        14px;
-
-    background:
-        rgba(255,49,88,.08);
-
-    border:
-        1px solid
-        rgba(255,49,88,.10);
-}}
-
-
-.k-info-item strong {{
-
-    display:
-        block;
-
-    color:
-        #f1f2f7;
-
-    font:
-        700 12px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-.k-info-item span {{
-
-    display:
-        block;
-
-    margin-top:
-        2px;
-
-    color:
-        #7f8497;
-
-    font:
-        500 10px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-/* =====================================================
-   INPUTS
-   ===================================================== */
-
-div[data-baseweb="input"] > div,
-div[data-baseweb="textarea"] > div,
-div[data-baseweb="select"] > div {{
-
-    background:
-        #0d101a !important;
-
-    border-color:
-        rgba(255,255,255,.09) !important;
-
-    border-radius:
-        13px !important;
-}}
-
-
-input,
-textarea {{
-
-    color:
-        #fff !important;
-
-    font-family:
-        'KonohaCairo',
-        Cairo,
-        sans-serif !important;
-}}
-
-
-label {{
-
-    color:
-        #b8bdcd !important;
-
-    font:
-        600 12px
-        'KonohaCairo',
-        Cairo,
-        sans-serif !important;
-}}
-
-
-.stForm {{
-
-    border:
-        1px solid
-        rgba(255,255,255,.07) !important;
-
-    border-radius:
-        24px !important;
-
-    padding:
-        22px !important;
-
-    background:
-        rgba(8,10,18,.78) !important;
-}}
-
-
-/* =====================================================
-   DATAFRAME
-   ===================================================== */
-
-div[data-testid="stDataFrame"] {{
-
-    border:
-        1px solid
-        rgba(255,255,255,.07) !important;
-
-    border-radius:
-        17px !important;
-
-    overflow:
-        hidden !important;
-}}
-
-
-/* =====================================================
-   FORM BUTTON
-   ===================================================== */
-
-div.stFormSubmitButton > button {{
-
-    min-height:
-        47px !important;
-
-    border:
-        0 !important;
-
-    color:
-        #fff !important;
-
-    background:
-
-        linear-gradient(
-            100deg,
-            #ff3158,
-            #b52bff
-        ) !important;
-
-    box-shadow:
-        0 12px 28px
-        rgba(255,49,88,.17) !important;
-
-    font-weight:
-        800 !important;
-}}
-
-
-/* =====================================================
-   DOWNLOAD
-   ===================================================== */
-
-div.stDownloadButton > button {{
-
-    min-height:
-        46px !important;
-
-    border-color:
-        rgba(255,255,255,.09) !important;
-
-    background:
-        #10131f !important;
-
-    color:
-        #fff !important;
-}}
-
-
-/* =====================================================
-   LOGIN
-   ===================================================== */
-
-.k-login {{
-
-    max-width:
-        500px;
-
-    margin:
-        8vh auto 0;
-
-    padding:
-        42px 34px 30px;
-
-    border:
-        1px solid
-        rgba(255,49,88,.18);
-
-    border-radius:
-        30px;
-
-    background:
-
-        radial-gradient(
-            circle at 80% 5%,
-            rgba(255,49,88,.16),
-            transparent 35%
-        ),
-
-        linear-gradient(
-            145deg,
-            #10131f,
-            #070911
-        );
-
-    box-shadow:
-        0 35px 110px
-        rgba(0,0,0,.55);
-
-    text-align:
-        center;
-}}
-
-
-.k-login-logo {{
-
-    font:
-        900 58px
-        'KonohaInter',
-        Inter,
-        sans-serif;
-
-    letter-spacing:
-        2px;
-
-    background:
-
-        linear-gradient(
-            90deg,
-            #fff,
-            #ff617c,
-            #9b6cff
-        );
-
-    -webkit-background-clip:
-        text;
-
-    background-clip:
-        text;
-
-    color:
-        transparent;
-}}
-
-
-.k-login-sub {{
-
-    margin:
-        8px 0 24px;
-
-    color:
-        #858a9d;
-
-    font:
-        500 12px
-        'KonohaCairo',
-        Cairo,
-        sans-serif;
-}}
-
-
-/* =====================================================
-   MOBILE
-   ===================================================== */
-
-@media (max-width: 1000px) {{
-
-    .k-card-grid {{
-        grid-template-columns:
-            repeat(
-                2,
-                minmax(0,1fr)
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+
+    .konuha-hero {
+        padding: 42px;
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background:
+            radial-gradient(
+                circle at 78% 25%,
+                rgba(236, 89, 184, 0.16),
+                transparent 30%
+            ),
+            radial-gradient(
+                circle at 60% 100%,
+                rgba(100, 75, 255, 0.13),
+                transparent 45%
+            ),
+            linear-gradient(
+                135deg,
+                #0d1023,
+                #17122b
             );
-    }}
+        box-shadow: 0 25px 70px rgba(0, 0, 0, 0.28);
+        margin-bottom: 20px;
+    }
 
-    .k-hero-art {{
-        right:
-            -100px;
+    .konuha-hero-title {
+        font-family: Inter, sans-serif;
+        font-size: 72px;
+        font-weight: 800;
+        letter-spacing: 2px;
+        background: linear-gradient(
+            90deg,
+            #ffffff,
+            #bb79ff,
+            #ed63ba
+        );
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        line-height: 1;
+    }
 
-        opacity:
-            .28;
-    }}
+    .konuha-hero-sub {
+        margin-top: 14px;
+        color: #d6d2e0;
+        font-size: 17px;
+    }
 
-    .k-hero-title {{
-        font-size:
-            60px;
-    }}
-}}
+    .konuha-hero-line {
+        width: 65px;
+        height: 4px;
+        border-radius: 20px;
+        background: linear-gradient(
+            90deg,
+            var(--purple),
+            var(--pink)
+        );
+        margin-top: 22px;
+    }
 
+    .konuha-status-online {
+        color: var(--green);
+        text-align: center;
+        font-size: 14px;
+        font-weight: 600;
+        padding-top: 10px;
+    }
 
-@media (max-width: 700px) {{
+    .konuha-status-offline {
+        color: var(--red);
+        text-align: center;
+        font-size: 14px;
+        font-weight: 600;
+        padding-top: 10px;
+    }
 
-    .block-container {{
-        padding:
-            12px 12px 40px !important;
-    }}
+    @media (max-width: 800px) {
 
-    .k-top {{
-        align-items:
-            flex-start;
+        .block-container {
+            padding: 16px 12px 35px !important;
+        }
 
-        flex-direction:
-            column;
-    }}
+        .konuha-hero {
+            padding: 26px 20px;
+        }
 
-    .k-brand {{
-        min-width:
-            0;
-    }}
+        .konuha-hero-title {
+            font-size: 45px;
+        }
 
-    .k-hero {{
-        min-height:
-            350px;
+        .stButton > button {
+            min-height: 42px !important;
+        }
 
-        padding:
-            30px 22px;
+    }
 
-        border-radius:
-            23px;
-    }}
-
-    .k-hero-title {{
-        font-size:
-            45px;
-
-        letter-spacing:
-            1px;
-    }}
-
-    .k-hero-sub {{
-        font-size:
-            13px;
-    }}
-
-    .k-hero-art {{
-        width:
-            330px;
-
-        height:
-            330px;
-
-        right:
-            -105px;
-
-        bottom:
-            -65px;
-
-        opacity:
-            .23;
-    }}
-
-    .k-card-grid {{
-        gap:
-            10px;
-    }}
-
-    .k-card {{
-        min-height:
-            125px;
-
-        padding:
-            15px;
-    }}
-
-    .k-card-value {{
-        font-size:
-            27px;
-    }}
-
-    .k-info {{
-        min-height:
-            auto;
-    }}
-}}
-
-
-@media (max-width: 430px) {{
-
-    .k-card-grid {{
-        grid-template-columns:
-            1fr 1fr;
-    }}
-
-    .k-brand-name {{
-        font-size:
-            19px;
-    }}
-
-    .k-brand-mark {{
-        width:
-            38px;
-
-        height:
-            38px;
-    }}
-}}
-
-</style>
-""",
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
@@ -1839,19 +483,16 @@ if "authenticated" not in st.session_state:
 if not st.session_state.authenticated:
 
     st.markdown(
-        """
-        <div class="k-login">
-            <div class="k-login-logo">
-                KONUHA
-            </div>
-
-            <div class="k-login-sub">
-                نظام إدارة الأعضاء والمشرفين
-            </div>
-        </div>
-        """,
+        "<div style='height:10vh'></div>",
         unsafe_allow_html=True,
     )
+
+    st.markdown(
+        "<div class='konuha-login-title'>KONUHA</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.caption("نظام إدارة الأعضاء والمشرفين")
 
     with st.form("konuha_login"):
 
@@ -1871,173 +512,112 @@ if not st.session_state.authenticated:
         if SITE_PASSWORD and password == SITE_PASSWORD:
 
             st.session_state.authenticated = True
-
             st.rerun()
 
-        elif not SITE_PASSWORD:
-
-            st.error(
-                "لم يتم ضبط SITE_PASSWORD في Secrets."
-            )
-
         else:
-
-            st.error(
-                "كلمة المرور غير صحيحة."
-            )
+            st.error("كلمة المرور غير صحيحة.")
 
     st.stop()
 
 
 # =========================================================
-# DATA
+# LOAD DATA
 # =========================================================
 
-members = load_members()
-supervisors = load_supervisors()
+members = get_members()
+supervisors = get_supervisors()
 
+database_status = check_database_connection()
+
+
+# =========================================================
+# SESSION PAGE
+# =========================================================
 
 if "page" not in st.session_state:
     st.session_state.page = "الرئيسية"
 
 
-NAVIGATION = [
-
-    ("⌂", "الرئيسية"),
-
-    ("♙", "الأعضاء"),
-
-    ("＋", "إضافة عضو"),
-
-    ("♜", "المشرفين"),
-
-    ("✚", "إضافة مشرف"),
-
-    ("▦", "الإحصائيات"),
-
-    ("⇩", "التصدير"),
-
-    ("⌫", "الحذف"),
-
-]
-
-
 # =========================================================
-# HEADER
+# TOP BAR
 # =========================================================
 
-connected = check_connection()
+top1, top2, top3 = st.columns([1, 1, 2])
 
-status_class = (
-    "online"
-    if connected
-    else
-    "offline"
-)
+with top1:
 
-status_text = (
-    "🟢 متصل بـ Supabase"
-    if connected
-    else
-    "🔴 غير متصل بـ Supabase"
-)
+    if st.button(
+        "KONUHA",
+        use_container_width=True,
+    ):
+        st.session_state.page = "الرئيسية"
+        st.rerun()
 
 
-st.markdown(
-    f"""
-    <div class="k-top">
+with top2:
 
-        <div class="k-brand">
+    if st.button(
+        "↪ تسجيل الخروج",
+        use_container_width=True,
+    ):
+        st.session_state.authenticated = False
+        st.rerun()
 
-            <div class="k-brand-mark">
-                K
-            </div>
 
-            <div>
+with top3:
 
-                <div class="k-brand-name">
-                    KONUHA
-                </div>
+    if database_status:
 
-                <div class="k-brand-sub">
-                    CONTROL • MEMBERS • DATA
-                </div>
+        st.markdown(
+            "<div class='konuha-status-online'>"
+            "🟢 متصل بـ Supabase"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
-            </div>
+    else:
 
-        </div>
-
-        <div class="k-status {status_class}">
-            {status_text}
-        </div>
-
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+        st.markdown(
+            "<div class='konuha-status-offline'>"
+            "🔴 غير متصل بـ Supabase"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
 
 # =========================================================
 # NAVIGATION
 # =========================================================
 
-nav_cols = st.columns(
-    len(NAVIGATION),
-    gap="small",
-)
+navigation = [
+    ("⌂", "الرئيسية"),
+    ("♟", "الأعضاء"),
+    ("＋", "إضافة عضو"),
+    ("◈", "المشرفين"),
+    ("＋", "إضافة مشرف"),
+    ("▥", "الإحصائيات"),
+    ("⇩", "التصدير"),
+    ("⌫", "الحذف"),
+]
 
 
-for col, (icon, label) in zip(
-    nav_cols,
-    NAVIGATION,
-):
+nav_columns = st.columns(4)
 
-    with col:
+for index, (icon, label) in enumerate(navigation):
 
-        if st.session_state.page == label:
-
-            st.markdown(
-                '<div class="k-nav-active"></div>',
-                unsafe_allow_html=True,
-            )
+    with nav_columns[index % 4]:
 
         if st.button(
             f"{icon}  {label}",
-            key=f"nav_{label}",
+            key=f"navigation_{index}",
             use_container_width=True,
         ):
 
             st.session_state.page = label
-
             st.rerun()
 
 
-st.markdown(
-    "<div style='height:8px'></div>",
-    unsafe_allow_html=True,
-)
-
-
-# =========================================================
-# LOGOUT
-# =========================================================
-
-logout_col = st.columns(
-    [7, 1]
-)[1]
-
-
-with logout_col:
-
-    if st.button(
-        "↪ خروج",
-        key="logout",
-        use_container_width=True,
-    ):
-
-        st.session_state.authenticated = False
-
-        st.rerun()
+st.divider()
 
 
 # =========================================================
@@ -2046,314 +626,101 @@ with logout_col:
 
 if st.session_state.page == "الرئيسية":
 
-    today_members = sum(
-        1
-        for member in members
-        if parse_date(
-            member.get("created_at")
-        ) == date.today()
-    )
-
-
     st.markdown(
         """
-        <section class="k-hero">
-
-            <div class="k-orb"></div>
-
-            <div class="k-hero-art"></div>
-
-            <div class="k-hero-content">
-
-                <div class="k-eyebrow">
-                    <i></i>
-                    KONUHA CONTROL CENTER
-                </div>
-
-                <div class="k-hero-title">
-                    KONUHA
-                </div>
-
-                <div class="k-hero-sub">
-
-                    نظام إدارة الأعضاء والمشرفين —
-                    كل بياناتك في مكان واحد،
-                    بواجهة سريعة وواضحة ومصممة بهوية KONUHA.
-
-                </div>
-
-                <div class="k-hero-quote">
-
-                    "نظام مرتب. بيانات واضحة. إدارة أسهل."
-
-                </div>
-
-                <div class="k-hero-line"></div>
-
+        <div class="konuha-hero">
+            <div class="konuha-hero-title">
+                KONUHA
             </div>
 
-        </section>
+            <div class="konuha-hero-sub">
+                نظام إدارة الأعضاء والمشرفين — كل بياناتك بمكان واحد
+            </div>
+
+            <div class="konuha-hero-line"></div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
 
+    today_members = 0
 
-    st.markdown(
-        '<div class="k-section-title">نظرة سريعة</div>',
-        unsafe_allow_html=True,
-    )
+    for member in members:
+
+        created = parse_date(
+            member.get("created_at")
+        )
+
+        if created == date.today():
+            today_members += 1
 
 
-    cards = [
+    stat1, stat2, stat3, stat4 = st.columns(4)
 
-        (
-            "👥",
+    with stat1:
+        st.metric(
             "إجمالي الأعضاء",
             len(members),
-            "red",
-        ),
+        )
 
-        (
-            "♜",
+    with stat2:
+        st.metric(
             "المشرفين",
             len(supervisors),
-            "purple",
-        ),
+        )
 
-        (
-            "✦",
+    with stat3:
+        st.metric(
             "أعضاء اليوم",
             today_members,
-            "blue",
-        ),
+        )
 
-        (
-            "⌁",
+    with stat4:
+        st.metric(
             "حالة النظام",
-            "متصل"
-            if connected
-            else
-            "غير متصل",
-            "green",
-        ),
-
-    ]
-
-
-    card_html = '<div class="k-card-grid">'
-
-
-    for icon, label, value, color in cards:
-
-        card_html += f"""
-        <div class="k-card {color}">
-
-            <div class="k-card-icon">
-                {icon}
-            </div>
-
-            <div class="k-card-label">
-                {label}
-            </div>
-
-            <div class="k-card-value">
-                {value}
-            </div>
-
-        </div>
-        """
-
-
-    card_html += "</div>"
-
-
-    st.markdown(
-        card_html,
-        unsafe_allow_html=True,
-    )
-
-
-    st.markdown(
-        '<div class="k-section-title">آخر النشاطات</div>',
-        unsafe_allow_html=True,
-    )
-
-
-    left, right = st.columns(
-        [2.05, 1],
-        gap="medium",
-    )
-
-
-    # -----------------------------------------------------
-    # LATEST MEMBERS
-    # -----------------------------------------------------
-
-    with left:
-
-        st.markdown(
-            """
-            <div class="k-panel">
-                <div class="k-panel-title">
-                    آخر الأعضاء المضافين
-                </div>
-            """,
-            unsafe_allow_html=True,
+            "متصل" if database_status else "غير متصل",
         )
 
 
-        latest_rows = []
+    st.subheader("آخر الأعضاء")
 
 
-        for member in members[:10]:
+    latest_rows = []
 
-            latest_rows.append(
-                {
-                    "اللقب":
-                        member.get(
-                            "nickname",
-                            "",
-                        ),
+    for member in members[:10]:
 
-                    "الرقم":
-                        member.get(
-                            "phone",
-                            "",
-                        ),
-
-                    "من طرف":
-                        supervisor_name(
-                            supervisors,
-                            member.get(
-                                "referrer_id"
-                            ),
-                        ),
-
-                    "استقبله":
-                        supervisor_name(
-                            supervisors,
-                            member.get(
-                                "receiver_id"
-                            ),
-                        ),
-
-                    "تاريخ الإضافة":
-                        member.get(
-                            "created_at",
-                            "",
-                        ),
-                }
-            )
-
-
-        if latest_rows:
-
-            st.dataframe(
-                pd.DataFrame(
-                    latest_rows
+        latest_rows.append(
+            {
+                "اللقب": member.get("nickname", ""),
+                "الرقم": member.get("phone", ""),
+                "من طرف": get_supervisor_name(
+                    supervisors,
+                    member.get("referrer_id"),
                 ),
-                use_container_width=True,
-                hide_index=True,
-                height=330,
-            )
-
-        else:
-
-            st.info(
-                "لا توجد أعضاء مسجلين حالياً."
-            )
-
-
-        st.markdown(
-            "</div>",
-            unsafe_allow_html=True,
+                "استقبله": get_supervisor_name(
+                    supervisors,
+                    member.get("receiver_id"),
+                ),
+                "تاريخ الإضافة": member.get(
+                    "created_at",
+                    "",
+                ),
+            }
         )
 
 
-    # -----------------------------------------------------
-    # INFO
-    # -----------------------------------------------------
+    if latest_rows:
 
-    with right:
+        st.dataframe(
+            pd.DataFrame(latest_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        st.markdown(
-            """
-            <div class="k-info">
+    else:
 
-                <div class="k-info-logo">
-                    KONUHA
-                </div>
-
-                <div class="k-info-title">
-                    لوحة تحكم واحدة لكل ما تحتاجه
-                </div>
-
-
-                <div class="k-info-item">
-
-                    <div class="k-info-icon">
-                        👥
-                    </div>
-
-                    <div>
-
-                        <strong>
-                            إدارة الأعضاء
-                        </strong>
-
-                        <span>
-                            إضافة، فحص، عرض وحذف البيانات.
-                        </span>
-
-                    </div>
-
-                </div>
-
-
-                <div class="k-info-item">
-
-                    <div class="k-info-icon">
-                        ♜
-                    </div>
-
-                    <div>
-
-                        <strong>
-                            المشرفون
-                        </strong>
-
-                        <span>
-                            تحديد المسؤولين واستخدامهم في التسجيل.
-                        </span>
-
-                    </div>
-
-                </div>
-
-
-                <div class="k-info-item">
-
-                    <div class="k-info-icon">
-                        ⚡
-                    </div>
-
-                    <div>
-
-                        <strong>
-                            إحصائيات واضحة
-                        </strong>
-
-                        <span>
-                            متابعة الأرقام حسب المشرف والفترة.
-                        </span>
-
-                    </div>
-
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
+        st.info(
+            "لا توجد أعضاء مسجلين حالياً."
         )
 
 
@@ -2363,27 +730,16 @@ if st.session_state.page == "الرئيسية":
 
 elif st.session_state.page == "الأعضاء":
 
-    st.markdown(
-        '<div class="k-section-title">الأعضاء</div>',
-        unsafe_allow_html=True,
-    )
-
+    st.title("الأعضاء")
 
     search = st.text_input(
         "البحث",
-        placeholder="اكتب اللقب أو الرقم...",
-        key="member_search",
+        placeholder="اللقب أو الرقم...",
     )
 
+    member_rows = []
 
-    rows = []
-
-
-    query = (
-        normalize_arabic(search)
-        if search
-        else ""
-    )
+    normalized_search = normalize_arabic(search)
 
 
     for member in members:
@@ -2404,68 +760,42 @@ elif st.session_state.page == "الأعضاء":
         if search:
 
             nickname_match = (
-                query
-                in normalize_arabic(
-                    nickname
-                )
+                normalized_search
+                in normalize_arabic(nickname)
             )
 
             phone_match = (
-                str(search).strip()
-                in phone
+                search in phone
             )
 
-
-            if (
-                not nickname_match
-                and not phone_match
-            ):
+            if not nickname_match and not phone_match:
                 continue
 
 
-        rows.append(
+        member_rows.append(
             {
-                "اللقب":
-                    nickname,
-
-                "الرقم":
-                    phone,
-
-                "من طرف":
-                    supervisor_name(
-                        supervisors,
-                        member.get(
-                            "referrer_id"
-                        ),
-                    ),
-
-                "استقبله":
-                    supervisor_name(
-                        supervisors,
-                        member.get(
-                            "receiver_id"
-                        ),
-                    ),
-
-                "تاريخ الإضافة":
-                    member.get(
-                        "created_at",
-                        "",
-                    ),
+                "اللقب": nickname,
+                "الرقم": phone,
+                "من طرف": get_supervisor_name(
+                    supervisors,
+                    member.get("referrer_id"),
+                ),
+                "استقبله": get_supervisor_name(
+                    supervisors,
+                    member.get("receiver_id"),
+                ),
+                "تاريخ الإضافة": member.get(
+                    "created_at",
+                    "",
+                ),
             }
         )
 
 
-    st.markdown(
-        '<div class="k-panel">',
-        unsafe_allow_html=True,
-    )
-
-
-    if rows:
+    if member_rows:
 
         st.dataframe(
-            pd.DataFrame(rows),
+            pd.DataFrame(member_rows),
             use_container_width=True,
             hide_index=True,
         )
@@ -2477,25 +807,25 @@ elif st.session_state.page == "الأعضاء":
         )
 
 
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-
 # =========================================================
 # ADD MEMBER
 # =========================================================
 
 elif st.session_state.page == "إضافة عضو":
 
-    st.markdown(
-        '<div class="k-section-title">إضافة عضو جديد</div>',
-        unsafe_allow_html=True,
-    )
+    st.title("إضافة عضو")
+
+    active_supervisors = [
+        supervisor
+        for supervisor in supervisors
+        if supervisor.get(
+            "is_active",
+            True,
+        )
+    ]
 
 
-    if not supervisors:
+    if not active_supervisors:
 
         st.warning(
             "لا يوجد مشرفون. أضف مشرفاً أولاً."
@@ -2503,256 +833,152 @@ elif st.session_state.page == "إضافة عضو":
 
     else:
 
-        active_supervisors = [
-            s
-            for s in supervisors
-            if s.get(
-                "is_active",
-                True,
-            )
-        ]
-
-
         supervisor_names = [
-            s["name"]
-            for s in active_supervisors
+            supervisor.get(
+                "name",
+                "",
+            )
+            for supervisor in active_supervisors
         ]
 
 
-        st.markdown(
-            '<div class="k-panel">',
-            unsafe_allow_html=True,
-        )
+        with st.form("add_member_form"):
 
+            nickname = st.text_input(
+                "اللقب",
+                placeholder="مثال: ايرن",
+            )
 
-        with st.form(
-            "add_member_form"
-        ):
+            phone = st.text_input(
+                "الرقم",
+                placeholder="9647XXXXXXXX",
+            )
 
-            c1, c2 = st.columns(2)
+            referrer = st.selectbox(
+                "من طرف",
+                supervisor_names,
+            )
 
-
-            with c1:
-
-                nickname = st.text_input(
-                    "اللقب",
-                    placeholder="مثال: ايرن",
-                )
-
-
-            with c2:
-
-                phone = st.text_input(
-                    "الرقم",
-                    placeholder="9647XXXXXXXX",
-                )
-
-
-            c3, c4 = st.columns(2)
-
-
-            with c3:
-
-                referrer = st.selectbox(
-                    "من طرف",
-                    supervisor_names,
-                )
-
-
-            with c4:
-
-                receiver = st.selectbox(
-                    "استقبله",
-                    supervisor_names,
-                )
-
+            receiver = st.selectbox(
+                "استقبله",
+                supervisor_names,
+            )
 
             force_add = st.checkbox(
-                "إضافة إجبارية إذا كان هناك لقب مشابه"
+                "إضافة إجبارية عند وجود لقب مشابه",
             )
 
-
-            submit = st.form_submit_button(
+            submit_member = st.form_submit_button(
                 "إضافة العضو",
                 use_container_width=True,
             )
 
 
-        st.markdown(
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-
-        if submit:
+        if submit_member:
 
             nickname = nickname.strip()
-            phone = phone.strip()
+
+            phone = re.sub(
+                r"\D",
+                "",
+                phone,
+            )
 
 
             if not nickname or not phone:
 
                 st.error(
-                    "أكمل جميع البيانات."
+                    "أدخل اللقب والرقم."
                 )
 
 
-            elif supabase is None:
+            elif any(
+                str(member.get("phone", "")) == phone
+                for member in members
+            ):
 
                 st.error(
-                    "قاعدة البيانات غير متصلة."
+                    "هذا الرقم مسجل مسبقاً."
                 )
 
 
             else:
 
-                try:
-
-                    duplicate = (
-                        supabase
-                        .table("members")
-                        .select(
-                            "id,nickname,phone"
-                        )
-                        .eq(
-                            "phone",
-                            phone,
-                        )
-                        .limit(1)
-                        .execute()
-                        .data
-                    )
-
-                except Exception:
-
-                    duplicate = []
+                similar_results = find_similar_members(
+                    members,
+                    nickname,
+                )
 
 
-                similar_members = [
+                if similar_results and not force_add:
 
-                    member.get(
-                        "nickname",
-                        "",
-                    )
-
-                    for member in members
-
-                    if similarity(
+                    similar_names = ", ".join(
                         member.get(
                             "nickname",
                             "",
-                        ),
-                        nickname,
-                    ) >= 0.82
-
-                ]
-
-
-                if duplicate:
-
-                    st.error(
-                        "هذا الرقم مسجل مسبقاً. "
-                        "الإضافة الإجبارية لا تتجاوز تكرار الرقم."
+                        )
+                        for member in similar_results
                     )
-
-
-                elif (
-                    similar_members
-                    and not force_add
-                ):
-
-                    names = ", ".join(
-                        similar_members[:5]
-                    )
-
 
                     st.warning(
-                        f"يوجد لقب مشابه بالفعل: {names}"
+                        "يوجد لقب مشابه: "
+                        + similar_names
+                        + " — فعّل الإضافة الإجبارية "
+                        "إذا كان العضو مختلفاً."
                     )
-
-
-                    st.info(
-                        "إذا كنت متأكداً أن العضو مختلف، "
-                        "فعّل خيار الإضافة الإجبارية."
-                    )
-
 
                 else:
 
-                    referrer_obj = next(
-                        (
-                            s
-                            for s in active_supervisors
-                            if s["name"]
-                            == referrer
-                        ),
-                        None,
+                    referrer_obj = get_supervisor_by_name(
+                        supervisors,
+                        referrer,
+                    )
+
+                    receiver_obj = get_supervisor_by_name(
+                        supervisors,
+                        receiver,
                     )
 
 
-                    receiver_obj = next(
-                        (
-                            s
-                            for s in active_supervisors
-                            if s["name"]
-                            == receiver
-                        ),
-                        None,
-                    )
+                    if db is None:
 
+                        st.error(
+                            "قاعدة البيانات غير متصلة."
+                        )
 
-                    if (
-                        not referrer_obj
-                        or not receiver_obj
-                    ):
+                    elif not referrer_obj or not receiver_obj:
 
                         st.error(
                             "تعذر العثور على المشرف."
                         )
 
-
                     else:
 
                         try:
 
-                            (
-                                supabase
-                                .table("members")
-                                .insert(
-                                    {
-                                        "nickname":
-                                            nickname,
-
-                                        "normalized_nickname":
-                                            normalize_arabic(
-                                                nickname
-                                            ),
-
-                                        "phone":
-                                            phone,
-
-                                        "referrer_id":
-                                            referrer_obj[
-                                                "id"
-                                            ],
-
-                                        "receiver_id":
-                                            receiver_obj[
-                                                "id"
-                                            ],
-                                    }
-                                )
-                                .execute()
-                            )
+                            db.table(
+                                "members"
+                            ).insert(
+                                {
+                                    "nickname": nickname,
+                                    "normalized_nickname":
+                                        normalize_arabic(
+                                            nickname
+                                        ),
+                                    "phone": phone,
+                                    "referrer_id":
+                                        referrer_obj["id"],
+                                    "receiver_id":
+                                        receiver_obj["id"],
+                                }
+                            ).execute()
 
 
-                            clear_database_cache()
-
+                            clear_cache()
 
                             st.success(
                                 "تمت إضافة العضو بنجاح."
                             )
-
 
                             st.rerun()
 
@@ -2760,7 +986,7 @@ elif st.session_state.page == "إضافة عضو":
                         except Exception as error:
 
                             st.error(
-                                f"حدث خطأ أثناء الإضافة: {error}"
+                                f"تعذر إضافة العضو: {error}"
                             )
 
 
@@ -2770,60 +996,42 @@ elif st.session_state.page == "إضافة عضو":
 
 elif st.session_state.page == "المشرفين":
 
-    st.markdown(
-        '<div class="k-section-title">المشرفين</div>',
-        unsafe_allow_html=True,
-    )
+    st.title("المشرفين")
 
 
-    rows = [
+    supervisor_rows = []
 
-        {
-            "الاسم":
-                s.get(
+    for supervisor in supervisors:
+
+        supervisor_rows.append(
+            {
+                "الاسم": supervisor.get(
                     "name",
                     "",
                 ),
-
-            "اللقب":
-                s.get(
+                "اللقب": supervisor.get(
                     "nickname",
                     "",
                 ),
-
-            "الحالة":
-                (
+                "الحالة":
                     "فعال"
-                    if s.get(
+                    if supervisor.get(
                         "is_active",
                         True,
                     )
-                    else
-                    "متوقف"
-                ),
-
-            "تاريخ الإضافة":
-                s.get(
+                    else "غير فعال",
+                "تاريخ الإضافة": supervisor.get(
                     "created_at",
                     "",
                 ),
-        }
-
-        for s in supervisors
-
-    ]
+            }
+        )
 
 
-    st.markdown(
-        '<div class="k-panel">',
-        unsafe_allow_html=True,
-    )
-
-
-    if rows:
+    if supervisor_rows:
 
         st.dataframe(
-            pd.DataFrame(rows),
+            pd.DataFrame(supervisor_rows),
             use_container_width=True,
             hide_index=True,
         )
@@ -2835,79 +1043,64 @@ elif st.session_state.page == "المشرفين":
         )
 
 
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-
 # =========================================================
 # ADD SUPERVISOR
 # =========================================================
 
 elif st.session_state.page == "إضافة مشرف":
 
-    st.markdown(
-        '<div class="k-section-title">إضافة مشرف</div>',
-        unsafe_allow_html=True,
-    )
+    st.title("إضافة مشرف")
 
 
-    st.markdown(
-        '<div class="k-panel">',
-        unsafe_allow_html=True,
-    )
+    with st.form("add_supervisor_form"):
 
+        supervisor_name = st.text_input(
+            "اسم المشرف",
+        )
 
-    with st.form(
-        "add_supervisor_form"
-    ):
+        supervisor_nickname = st.text_input(
+            "لقب المشرف",
+        )
 
-        c1, c2 = st.columns(2)
-
-
-        with c1:
-
-            name = st.text_input(
-                "اسم المشرف",
-                placeholder="مثال: احمد",
-            )
-
-
-        with c2:
-
-            nickname = st.text_input(
-                "لقب المشرف",
-                placeholder="مثال: المشرف العام",
-            )
-
-
-        submit = st.form_submit_button(
+        submit_supervisor = st.form_submit_button(
             "إضافة المشرف",
             use_container_width=True,
         )
 
 
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    if submit_supervisor:
+
+        supervisor_name = supervisor_name.strip()
+        supervisor_nickname = supervisor_nickname.strip()
 
 
-    if submit:
-
-        name = name.strip()
-        nickname = nickname.strip()
-
-
-        if not name or not nickname:
+        if not supervisor_name or not supervisor_nickname:
 
             st.error(
-                "أكمل جميع البيانات."
+                "أدخل الاسم واللقب."
             )
 
 
-        elif supabase is None:
+        elif any(
+            normalize_arabic(
+                supervisor_name
+            )
+            ==
+            normalize_arabic(
+                supervisor.get(
+                    "name",
+                    "",
+                )
+            )
+            for supervisor in supervisors
+        ):
+
+            st.error(
+                "هذا المشرف موجود مسبقاً."
+            )
+
+
+        elif db is None:
 
             st.error(
                 "قاعدة البيانات غير متصلة."
@@ -2918,77 +1111,38 @@ elif st.session_state.page == "إضافة مشرف":
 
             try:
 
-                existing = (
-                    supabase
-                    .table("supervisors")
-                    .select(
-                        "id,name,nickname"
-                    )
-                    .eq(
-                        "normalized_name",
-                        normalize_arabic(
-                            name
-                        ),
-                    )
-                    .limit(1)
-                    .execute()
-                    .data
+                db.table(
+                    "supervisors"
+                ).insert(
+                    {
+                        "name": supervisor_name,
+                        "nickname": supervisor_nickname,
+                        "normalized_name":
+                            normalize_arabic(
+                                supervisor_name
+                            ),
+                        "normalized_nickname":
+                            normalize_arabic(
+                                supervisor_nickname
+                            ),
+                        "is_active": True,
+                    }
+                ).execute()
+
+
+                clear_cache()
+
+                st.success(
+                    "تمت إضافة المشرف."
                 )
 
-
-                if existing:
-
-                    st.warning(
-                        "يوجد مشرف بهذا الاسم مسبقاً."
-                    )
-
-
-                else:
-
-                    (
-                        supabase
-                        .table("supervisors")
-                        .insert(
-                            {
-                                "name":
-                                    name,
-
-                                "nickname":
-                                    nickname,
-
-                                "normalized_name":
-                                    normalize_arabic(
-                                        name
-                                    ),
-
-                                "normalized_nickname":
-                                    normalize_arabic(
-                                        nickname
-                                    ),
-
-                                "is_active":
-                                    True,
-                            }
-                        )
-                        .execute()
-                    )
-
-
-                    clear_database_cache()
-
-
-                    st.success(
-                        "تمت إضافة المشرف بنجاح."
-                    )
-
-
-                    st.rerun()
+                st.rerun()
 
 
             except Exception as error:
 
                 st.error(
-                    f"حدث خطأ: {error}"
+                    f"تعذر إضافة المشرف: {error}"
                 )
 
 
@@ -2998,52 +1152,46 @@ elif st.session_state.page == "إضافة مشرف":
 
 elif st.session_state.page == "الإحصائيات":
 
-    st.markdown(
-        '<div class="k-section-title">الإحصائيات</div>',
-        unsafe_allow_html=True,
+    st.title("الإحصائيات")
+
+
+    supervisor_options = [
+        "الكل"
+    ] + [
+        supervisor.get(
+            "name",
+            "",
+        )
+        for supervisor in supervisors
+    ]
+
+
+    selected_supervisor = st.selectbox(
+        "المشرف",
+        supervisor_options,
     )
 
 
-    c1, c2 = st.columns(2)
+    period = st.selectbox(
+        "الفترة",
+        [
+            "كل الوقت",
+            "اليوم",
+            "امس",
+            "هذا_الشهر",
+            "تاريخ محدد",
+        ],
+    )
 
 
-    with c1:
-
-        supervisor_filter = st.selectbox(
-            "المشرف",
-            [
-                "الكل"
-            ]
-            +
-            [
-                s["name"]
-                for s in supervisors
-            ],
-        )
-
-
-    with c2:
-
-        period = st.selectbox(
-            "الفترة",
-            [
-                "الكل",
-                "اليوم",
-                "امس",
-                "هذا_الشهر",
-                "تاريخ محدد",
-            ],
-        )
-
-
-    selected_date = date.today()
+    selected_date = None
 
 
     if period == "تاريخ محدد":
 
         selected_date = st.date_input(
             "التاريخ",
-            date.today(),
+            value=date.today(),
         )
 
 
@@ -3052,166 +1200,71 @@ elif st.session_state.page == "الإحصائيات":
 
     for member in members:
 
-        if supervisor_filter != "الكل":
-
-            if (
-                supervisor_name(
-                    supervisors,
-                    member.get(
-                        "referrer_id"
-                    ),
-                )
-                != supervisor_filter
-            ):
-                continue
-
-
-        created_date = parse_date(
-            member.get(
-                "created_at"
+        if (
+            selected_supervisor != "الكل"
+            and get_supervisor_name(
+                supervisors,
+                member.get("referrer_id"),
             )
+            != selected_supervisor
+        ):
+            continue
+
+
+        member_date = parse_date(
+            member.get("created_at")
         )
 
 
-        if not created_date:
-            continue
+        keep = True
 
 
-        if (
-            period == "اليوم"
-            and created_date
-            != date.today()
-        ):
-            continue
+        if period == "اليوم":
 
-
-        if (
-            period == "امس"
-            and created_date
-            != date.today()
-            - timedelta(days=1)
-        ):
-            continue
-
-
-        if period == "هذا_الشهر":
-
-            current = date.today()
-
-            if (
-                created_date.year
-                != current.year
-                or
-                created_date.month
-                != current.month
-            ):
-                continue
-
-
-        if (
-            period == "تاريخ محدد"
-            and created_date
-            != selected_date
-        ):
-            continue
-
-
-        filtered_members.append(
-            member
-        )
-
-
-    stat_cards = [
-
-        (
-            "◉",
-            "النتيجة",
-            len(filtered_members),
-            "red",
-        ),
-
-        (
-            "♜",
-            "المشرف",
-            supervisor_filter,
-            "purple",
-        ),
-
-        (
-            "◷",
-            "الفترة",
-            period,
-            "blue",
-        ),
-
-        (
-            "✓",
-            "حالة الاتصال",
-            "متصل"
-            if connected
-            else
-            "غير متصل",
-            "green",
-        ),
-
-    ]
-
-
-    html = '<div class="k-card-grid">'
-
-
-    for (
-        icon,
-        label,
-        value,
-        color,
-    ) in stat_cards:
-
-        value_size = (
-            "22px"
-            if isinstance(
-                value,
-                str,
+            keep = (
+                member_date
+                == date.today()
             )
-            else
-            "31px"
-        )
 
 
-        html += f"""
-        <div class="k-card {color}">
+        elif period == "امس":
 
-            <div class="k-card-icon">
-                {icon}
-            </div>
-
-            <div class="k-card-label">
-                {label}
-            </div>
-
-            <div
-                class="k-card-value"
-                style="font-size:{value_size}"
-            >
-                {value}
-            </div>
-
-        </div>
-        """
+            keep = (
+                member_date
+                == date.today()
+                - timedelta(days=1)
+            )
 
 
-    html += "</div>"
+        elif period == "هذا_الشهر":
+
+            keep = (
+                member_date is not None
+                and member_date.year
+                == date.today().year
+                and member_date.month
+                == date.today().month
+            )
 
 
-    st.markdown(
-        html,
-        unsafe_allow_html=True,
-    )
+        elif period == "تاريخ محدد":
+
+            keep = (
+                member_date
+                == selected_date
+            )
 
 
-    st.markdown(
-        '<div class="k-section-title">تفصيل المشرفين</div>',
-        unsafe_allow_html=True,
+        if keep:
+
+            filtered_members.append(
+                member
+            )
+
+
+    st.metric(
+        "عدد الأعضاء",
+        len(filtered_members),
     )
 
 
@@ -3221,73 +1274,34 @@ elif st.session_state.page == "الإحصائيات":
     for supervisor in supervisors:
 
         count = sum(
-
-            1
-
+            str(member.get("referrer_id"))
+            == str(supervisor.get("id"))
             for member in filtered_members
-
-            if str(
-                member.get(
-                    "referrer_id"
-                )
-            )
-            ==
-            str(
-                supervisor.get(
-                    "id"
-                )
-            )
-
         )
 
 
         breakdown.append(
             {
-                "المشرف":
-                    supervisor.get(
-                        "name",
-                        "",
-                    ),
-
-                "اللقب":
-                    supervisor.get(
-                        "nickname",
-                        "",
-                    ),
-
-                "عدد الأعضاء":
-                    count,
+                "المشرف": supervisor.get(
+                    "name",
+                    "",
+                ),
+                "اللقب": supervisor.get(
+                    "nickname",
+                    "",
+                ),
+                "عدد الأعضاء": count,
             }
         )
-
-
-    st.markdown(
-        '<div class="k-panel">',
-        unsafe_allow_html=True,
-    )
 
 
     if breakdown:
 
         st.dataframe(
-            pd.DataFrame(
-                breakdown
-            ),
+            pd.DataFrame(breakdown),
             use_container_width=True,
             hide_index=True,
         )
-
-    else:
-
-        st.info(
-            "لا توجد بيانات."
-        )
-
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
 
 # =========================================================
@@ -3296,53 +1310,42 @@ elif st.session_state.page == "الإحصائيات":
 
 elif st.session_state.page == "التصدير":
 
-    st.markdown(
-        '<div class="k-section-title">التصدير</div>',
-        unsafe_allow_html=True,
-    )
+    st.title("التصدير")
 
 
-    export_rows = [
+    export_rows = []
 
-        {
-            "اللقب":
-                m.get(
+
+    for member in members:
+
+        export_rows.append(
+            {
+                "اللقب": member.get(
                     "nickname",
                     "",
                 ),
-
-            "الرقم":
-                m.get(
+                "الرقم": member.get(
                     "phone",
                     "",
                 ),
-
-            "من طرف":
-                supervisor_name(
+                "من طرف": get_supervisor_name(
                     supervisors,
-                    m.get(
+                    member.get(
                         "referrer_id"
                     ),
                 ),
-
-            "استقبله":
-                supervisor_name(
+                "استقبله": get_supervisor_name(
                     supervisors,
-                    m.get(
+                    member.get(
                         "receiver_id"
                     ),
                 ),
-
-            "تاريخ الإضافة":
-                m.get(
+                "تاريخ الإضافة": member.get(
                     "created_at",
                     "",
                 ),
-        }
-
-        for m in members
-
-    ]
+            }
+        )
 
 
     export_df = pd.DataFrame(
@@ -3350,26 +1353,24 @@ elif st.session_state.page == "التصدير":
     )
 
 
-    st.markdown(
-        '<div class="k-panel">',
-        unsafe_allow_html=True,
-    )
+    if not export_df.empty:
 
-
-    st.markdown(
-        "### تحميل البيانات"
-    )
-
-
-    csv_data = (
-        export_df
-        .to_csv(
-            index=False
+        st.dataframe(
+            export_df,
+            use_container_width=True,
+            hide_index=True,
         )
-        .encode(
-            "utf-8-sig"
+
+    else:
+
+        st.info(
+            "لا توجد بيانات للتصدير."
         )
-    )
+
+
+    csv_data = export_df.to_csv(
+        index=False
+    ).encode("utf-8-sig")
 
 
     st.download_button(
@@ -3408,115 +1409,13 @@ elif st.session_state.page == "التصدير":
     )
 
 
-    try:
-
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-
-
-        pdf_buffer = io.BytesIO()
-
-
-        pdf = canvas.Canvas(
-            pdf_buffer,
-            pagesize=A4,
-        )
-
-
-        width, height = A4
-
-        y = height - 50
-
-
-        pdf.setFont(
-            "Helvetica-Bold",
-            20,
-        )
-
-
-        pdf.drawString(
-            50,
-            y,
-            "KONUHA Members",
-        )
-
-
-        y -= 40
-
-
-        pdf.setFont(
-            "Helvetica",
-            9,
-        )
-
-
-        for member in members:
-
-            line = (
-                f"{member.get('nickname','')}"
-                f" | "
-                f"{member.get('phone','')}"
-            )
-
-
-            pdf.drawString(
-                50,
-                y,
-                line[:95],
-            )
-
-
-            y -= 17
-
-
-            if y < 50:
-
-                pdf.showPage()
-
-                y = height - 50
-
-                pdf.setFont(
-                    "Helvetica",
-                    9,
-                )
-
-
-        pdf.save()
-
-
-        st.download_button(
-            "⇩ تحميل PDF",
-            data=pdf_buffer.getvalue(),
-            file_name="konuha_members.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
-
-    except Exception:
-
-        st.info(
-            "PDF غير متاح حالياً. "
-            "تأكد من وجود reportlab."
-        )
-
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-
 # =========================================================
-# DELETE
+# DELETE MEMBER
 # =========================================================
 
 elif st.session_state.page == "الحذف":
 
-    st.markdown(
-        '<div class="k-section-title">حذف عضو</div>',
-        unsafe_allow_html=True,
-    )
+    st.title("حذف عضو")
 
 
     if not members:
@@ -3525,168 +1424,105 @@ elif st.session_state.page == "الحذف":
             "لا توجد أعضاء للحذف."
         )
 
-
     else:
 
         member_options = [
-            m.get(
-                "nickname",
-                "",
+            (
+                member.get(
+                    "nickname",
+                    "",
+                ),
+                member.get(
+                    "phone",
+                    "",
+                ),
             )
-            for m in members
+            for member in members
         ]
 
 
-        selected_nickname = st.selectbox(
+        selected_member = st.selectbox(
             "اختر العضو",
             member_options,
+            format_func=lambda item:
+                f"{item[0]} — {item[1]}",
         )
 
 
-        selected_member = next(
+        selected_nickname = selected_member[0]
+        selected_phone = selected_member[1]
+
+
+        member = next(
             (
-                m
-                for m in members
-                if m.get(
-                    "nickname"
+                item
+                for item in members
+                if item.get(
+                    "nickname",
+                    "",
                 )
                 == selected_nickname
+                and str(
+                    item.get(
+                        "phone",
+                        "",
+                    )
+                )
+                == str(selected_phone)
             ),
             None,
         )
 
 
-        if selected_member:
+        if member:
 
-            st.markdown(
-                f"""
-                <div
-                    class="k-panel"
-                    style="
-                        direction:rtl;
-                        text-align:right;
-                    "
-                >
-
-                    <div class="k-panel-title">
-                        معلومات العضو
-                    </div>
-
-                    <div
-                        style="
-                            color:#c8ccd9;
-                            font:
-                                500 13px
-                                'KonohaCairo',
-                                Cairo,
-                                sans-serif;
-                            line-height:2.1;
-                        "
-                    >
-
-                        <b>اللقب:</b>
-                        {selected_member.get(
-                            "nickname",
-                            ""
-                        )}
-
-                        <br>
-
-                        <b>الرقم:</b>
-                        {selected_member.get(
-                            "phone",
-                            ""
-                        )}
-
-                        <br>
-
-                        <b>من طرف:</b>
-                        {supervisor_name(
-                            supervisors,
-                            selected_member.get(
-                                "referrer_id"
-                            )
-                        )}
-
-                        <br>
-
-                        <b>استقبله:</b>
-                        {supervisor_name(
-                            supervisors,
-                            selected_member.get(
-                                "receiver_id"
-                            )
-                        )}
-
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
+            st.warning(
+                "سيتم حذف العضو: "
+                f"{selected_nickname} — "
+                f"{selected_phone}"
             )
 
 
-        confirm_delete = st.checkbox(
-            "أؤكد أنني أريد حذف هذا العضو نهائياً"
-        )
+            confirm_delete = st.checkbox(
+                "أؤكد أنني أريد حذف هذا العضو نهائياً"
+            )
 
 
-        delete_button = st.button(
-            "حذف العضو نهائياً",
-            use_container_width=True,
-        )
-
-
-        if delete_button:
-
-            if not confirm_delete:
-
-                st.warning(
-                    "فعّل التأكيد أولاً."
-                )
-
-
-            elif (
-                selected_member
-                and supabase is not None
+            if st.button(
+                "حذف نهائياً",
+                use_container_width=True,
+                disabled=not confirm_delete,
             ):
 
-                try:
-
-                    (
-                        supabase
-                        .table("members")
-                        .delete()
-                        .eq(
-                            "id",
-                            selected_member[
-                                "id"
-                            ],
-                        )
-                        .execute()
-                    )
-
-
-                    clear_database_cache()
-
-
-                    st.success(
-                        "تم حذف العضو بنجاح."
-                    )
-
-
-                    st.rerun()
-
-
-                except Exception as error:
+                if db is None:
 
                     st.error(
-                        f"حدث خطأ أثناء الحذف: {error}"
+                        "قاعدة البيانات غير متصلة."
                     )
 
+                else:
 
-            elif supabase is None:
+                    try:
 
-                st.error(
-                    "قاعدة البيانات غير متصلة."
-                )
+                        db.table(
+                            "members"
+                        ).delete().eq(
+                            "id",
+                            member["id"],
+                        ).execute()
+
+
+                        clear_cache()
+
+                        st.success(
+                            "تم حذف العضو بنجاح."
+                        )
+
+                        st.rerun()
+
+
+                    except Exception as error:
+
+                        st.error(
+                            f"تعذر الحذف: {error}"
+                        )
